@@ -106,6 +106,17 @@ if [ -n "${LITELLM_BASE_URL:-}" ]; then
   echo "==> Proxy URL set to: $LITELLM_BASE_URL"
 fi
 
+# 4. Clear cached copies of this package so the next start fetches the
+#    latest version (makes re-running this installer act as an update).
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/opencode/packages"
+if [ -d "$CACHE_DIR" ]; then
+  for d in "$CACHE_DIR"/git-*/; do
+    [ -d "$d/node_modules/opencode-litellm-plugin" ] || continue
+    rm -rf "$d"
+    echo "==> Cleared cached package copy (latest version downloads on next start)"
+  done
+fi
+
 echo ""
 echo "Installed. Next steps:"
 echo ""
@@ -122,6 +133,13 @@ if [ -z "${LITELLM_BASE_URL:-}" ]; then
   echo '       { "package": "'"$PLUGIN_SPEC"'", "options": { "baseURL": "https://your-proxy/v1" } }'
   echo ""
 fi
-echo "  Restart OpenCode if it is running, then pick a litellm/* model."
-echo "  The provider becomes visible in /models once your key is connected"
-echo "  and the first models are discovered."
+echo "  3. Restart the service if OpenCode is running:"
+echo ""
+echo "       opencode2 service restart"
+echo ""
+echo "  Then pick a litellm/* model. The provider becomes visible in /models"
+echo "  once your key is connected and the first models are discovered."
+echo ""
+echo "  If no models appear, check the plugin log:"
+echo ""
+echo "       tail -20 ~/.local/share/opencode/litellm-plugin.log"

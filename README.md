@@ -133,8 +133,31 @@ Models are re-synced from the proxy:
 Each sync also re-resolves the `/connect` credential, so a freshly
 connected key is picked up without a restart.
 
-Set `LITELLM_PLUGIN_DEBUG=1` in the service environment to write a debug
-log to `~/.local/share/opencode/litellm-plugin-debug.log`.
+Set `LITELLM_PLUGIN_DEBUG=/path/to/file` in the service environment to log
+to a custom path instead.
+
+## Troubleshooting
+
+No `litellm/*` models showing? Every sync is logged to
+`~/.local/share/opencode/litellm-plugin.log` — check the last lines:
+
+```bash
+tail -20 ~/.local/share/opencode/litellm-plugin.log
+```
+
+| Log line | Cause | Fix |
+|---|---|---|
+| `no API key found` | No key connected | `opencode2 auth login` → pick **LiteLLM** → paste key, then restart |
+| `GET .../models -> 401` / `403` | Key rejected (wrong/expired) | Reconnect a valid proxy key via `opencode2 auth login` |
+| `fetch failed: ...` | Proxy unreachable | Check `options.baseURL`; for Tailscale proxies make sure the machine is on the tailnet |
+| no log lines at all | Plugin not loaded | `opencode2 api get /api/plugin` must show `litellm` active — restart after install |
+
+Quick reachability test from that machine (with your proxy key):
+
+```bash
+curl -s https://your-proxy.example.com/v1/models \
+  -H "Authorization: Bearer sk-..." | head -c 300
+```
 
 ## Notes
 

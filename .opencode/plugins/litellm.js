@@ -1,5 +1,5 @@
 import { userInfo } from "node:os"
-import { appendFileSync } from "node:fs"
+import { appendFileSync, statSync, renameSync, unlinkSync } from "node:fs"
 
 /**
  * OpenCode V2 plugin: LiteLLM proxy integration.
@@ -34,7 +34,13 @@ import { appendFileSync } from "node:fs"
  *   name            Display name (default "LiteLLM")
  *
  * With no options at all, every default above applies.
+ *
+ * Diagnostics: every sync is logged to
+ *   ~/.local/share/opencode/litellm-plugin.log
+ * (set LITELLM_PLUGIN_DEBUG to log to a custom path instead).
  */
+
+const VERSION = "1.2.1"
 
 const DEFAULTS = {
   providerID: "litellm",
@@ -55,15 +61,33 @@ function osUsername() {
   return process.env.USER || process.env.USERNAME || undefined
 }
 
-const DEBUG_FILE = process.env.LITELLM_PLUGIN_DEBUG
+function dataDir() {
+  return `${process.env.HOME || process.env.USERPROFILE || "."}/.local/share/opencode`
+}
+const LOG_FILE = process.env.LITELLM_PLUGIN_DEBUG
   ? (process.env.LITELLM_PLUGIN_DEBUG === "1"
-      ? `${process.env.HOME || process.env.USERPROFILE || "."}/.local/share/opencode/litellm-plugin-debug.log`
+      ? `${dataDir()}/litellm-plugin.log`
       : process.env.LITELLM_PLUGIN_DEBUG)
-  : undefined
-function debug(message) {
-  if (!DEBUG_FILE) return
+  : `${dataDir()}/litellm-plugin.log`
+
+function log(message) {
   try {
-    appendFileSync(DEBUG_FILE, `${new Date().toISOString()} ${message}\n`)
+    appendFileSync(LOG_FILE, `${new Date().toISOString()} ${message}\n`)
+  } catch {}
+}
+
+// Keep the log from growing without bound: rotate once when it passes 256 KB.
+let logRotated = false
+function rotateLogIfNeeded() {
+  try {
+    if (logRotated) return
+    logRotated = true
+    if (statSync(LOG_FILE).size > 256 * 1024) {
+      try {
+        unlinkSync(`${LOG_FILE}.old`)
+      } catch {}
+      renameSync(LOG_FILE, `${LOG_FILE}.old`)
+    }
   } catch {}
 }
 
@@ -74,10 +98,18 @@ export default {
     options.customerID ??= osUsername()
     const providerID = options.providerID
 
+    rotateLogIfNeeded()
+    log(`litellm plugin v${VERSION} loaded (providerID=${providerID}, baseURL=${options.baseURL})`)
+
     // Mutable state captured by the catalog transform. sync() updates it
     // and triggers a reload so the transform replays with fresh values.
     let baseURL = options.baseURL
     let apiKey = options.apiKey || process.env.LITELLM_API_KEY
+    let keySource = options.apiKey
+      ? "options.apiKey"
+      : process.env.LITELLM_API_KEY
+        ? "LITELLM_API_KEY env"
+        : "none"
     let models = []
 
     async function resolveCredential() {
@@ -85,7 +117,10 @@ export default {
         const connection = await ctx.integration.connection.active(providerID)
         if (!connection) return undefined
         const credential = await ctx.integration.connection.resolve(connection)
-        return credential && credential.type === "key" ? credential.key : undefined
+        if (credential && credential.type === "key") {
+          return { key: credential.key, source: "auth login credential" }
+        }
+        return undefined
       } catch {
         return undefined
       }
@@ -114,38 +149,65 @@ export default {
     })
 
     async function sync(reason) {
-      const credentialKey = await resolveCredential()
-      if (credentialKey) apiKey = credentialKey
-      if (options.apiKey) apiKey = options.apiKey
-      debug(`sync (${reason || "startup"}): key=${apiKey ? "set" : "unset"} baseURL=${baseURL}`)
+      const credential = await resolveCredential()
+      if (credential) {
+        apiKey = credential.key
+        keySource = credential.source
+      }
+      if (options.apiKey) {
+        apiKey = options.apiKey
+        keySource = "options.apiKey"
+      }
+      const why = reason || "startup"
 
-      if (apiKey) {
-        try {
-          const res = await fetch(`${baseURL.replace(/\/$/, "")}/models`, {
-            headers: {
-              Authorization: `Bearer ${apiKey}`,
-              ...(options.customerID
-                ? { "x-litellm-customer-id": options.customerID }
-                : {}),
-            },
-            signal: AbortSignal.timeout(15_000),
-          })
-          if (res.ok) {
-            const json = await res.json()
-            const data = Array.isArray(json && json.data) ? json.data : []
-            const discovered = data
-              .map((m) => (m ? m.id : undefined))
-              .filter((id) => typeof id === "string" && !!id)
-              .filter((id) => !id.includes(options.exclude))
-            const added = discovered.filter((id) => !models.includes(id))
-            const removed = models.filter((id) => !discovered.includes(id))
-            models = discovered
-            debug(`sync (${reason || "startup"}): ${discovered.length} models (+${added.length} new, -${removed.length} gone)`)
-          }
-        } catch {
-          debug(`sync (${reason || "startup"}): fetch failed`)
-          // network failures keep the previous model list
+      if (!apiKey) {
+        log(
+          `sync (${why}): no API key found — models NOT fetched. Fix one of: ` +
+            `run "opencode2 auth login" and pick LiteLLM, ` +
+            `or set options.apiKey, or export LITELLM_API_KEY`,
+        )
+        await ctx.catalog.reload()
+        return
+      }
+
+      log(`sync (${why}): key from ${keySource}, baseURL=${baseURL}`)
+      try {
+        const res = await fetch(`${baseURL.replace(/\/$/, "")}/models`, {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            ...(options.customerID
+              ? { "x-litellm-customer-id": options.customerID }
+              : {}),
+          },
+          signal: AbortSignal.timeout(15_000),
+        })
+        if (res.ok) {
+          const json = await res.json()
+          const data = Array.isArray(json && json.data) ? json.data : []
+          const discovered = data
+            .map((m) => (m ? m.id : undefined))
+            .filter((id) => typeof id === "string" && !!id)
+            .filter((id) => !id.includes(options.exclude))
+          const added = discovered.filter((id) => !models.includes(id))
+          const removed = models.filter((id) => !discovered.includes(id))
+          models = discovered
+          log(
+            `sync (${why}): ${discovered.length} models (+${added.length} new, -${removed.length} gone)`,
+          )
+        } else {
+          const hint =
+            res.status === 401 || res.status === 403
+              ? " — key rejected: check it is a valid LiteLLM proxy key"
+              : ""
+          log(`sync (${why}): GET ${baseURL}/models -> ${res.status} ${res.statusText}${hint}`)
+          // keep the previous model list
         }
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error)
+        log(
+          `sync (${why}): fetch failed: ${message} — is the proxy reachable at ${baseURL}?`,
+        )
+        // network failures keep the previous model list
       }
 
       await ctx.catalog.reload()
@@ -176,7 +238,7 @@ export default {
             Date.now() - lastSyncAt >= 30_000
           ) {
             lastSyncAt = Date.now()
-            debug("event: session.created -> sync")
+            log("event: session.created -> sync")
             void sync("session.created").catch(() => {})
           }
         }
