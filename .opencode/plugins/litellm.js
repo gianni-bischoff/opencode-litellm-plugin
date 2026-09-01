@@ -14,7 +14,7 @@ import { appendFileSync } from "node:fs"
  *    appear automatically.
  *
  * API key resolution order:
- *   1. The /connect credential (via `opencode auth login` / TUI)
+ *   1. The /connect credential (via `opencode2 auth login` / TUI)
  *   2. options.apiKey (hardcoded)
  *   3. LITELLM_API_KEY environment variable
  *

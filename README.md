@@ -39,7 +39,7 @@ The installer runs `opencode2 plugin add`, adds the required
 Then connect your key:
 
 ```bash
-opencode auth login
+opencode2 auth login
 ```
 
 Pick **LiteLLM** and paste your LiteLLM proxy key. After a restart the plugin
@@ -57,7 +57,7 @@ opencode2 plugin add git+https://github.com/gianni-bischoff/opencode-litellm-plu
 
 Then add this block to `~/.config/opencode/opencode.json` (or
 `opencode.jsonc`) yourself — it registers the provider and makes LiteLLM
-appear in `/connect` / `opencode auth login`:
+appear in `/connect` / `opencode2 auth login`:
 
 ```jsonc
 {
@@ -91,7 +91,7 @@ requests (the plugin keeps its settings updated at runtime):
 
 No `models` block is needed — the plugin adds the discovered models
 automatically. The `env` field is what makes LiteLLM appear in
-`/connect` and `opencode auth login`.
+`/connect` and `opencode2 auth login`.
 
 ## How the proxy URL is resolved
 
@@ -117,7 +117,7 @@ With no options at all, every default applies.
 
 ## API key resolution order
 
-1. The `/connect` credential (`opencode auth login` → LiteLLM)
+1. The `/connect` credential (`opencode2 auth login` → LiteLLM)
 2. `options.apiKey`
 3. The `LITELLM_API_KEY` environment variable
 
