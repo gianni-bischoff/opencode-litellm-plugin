@@ -8,16 +8,18 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/gianni-bischoff/opencode-litellm-plugin/main/install.sh | bash
 #
-# Optional environment variables:
-#   LITELLM_BASE_URL  Your proxy URL (default handled by the plugin:
-#                     http://127.0.0.1:4000/v1). Example:
+# With a proxy URL (pass it as an argument — env vars on the curl side of a
+# pipe do NOT reach bash):
 #
-#   LITELLM_BASE_URL=https://litellm.example.com/v1 \
-#     curl -fsSL https://raw.githubusercontent.com/gianni-bischoff/opencode-litellm-plugin/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/gianni-bischoff/opencode-litellm-plugin/main/install.sh \
+#     | bash -s -- https://your-proxy.example.com/v1
 #
+# (LITELLM_BASE_URL is still honored as a fallback.)
 set -euo pipefail
 
 PLUGIN_SPEC="git+https://github.com/gianni-bischoff/opencode-litellm-plugin.git"
+# Proxy URL: first script argument, else LITELLM_BASE_URL, else unset
+PROXY_URL="${1:-${LITELLM_BASE_URL:-}}"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
 CONFIG_FILE="$CONFIG_DIR/opencode.json"
 CONFIG_FILEC="$CONFIG_DIR/opencode.jsonc"
@@ -101,9 +103,9 @@ fi
 json_edit "$CONFIG_FILE" add-provider -
 
 # 3. Apply the proxy URL, if provided
-if [ -n "${LITELLM_BASE_URL:-}" ]; then
-  json_edit "$CONFIG_FILE" ensure-plugin-options "$LITELLM_BASE_URL"
-  echo "==> Proxy URL set to: $LITELLM_BASE_URL"
+if [ -n "$PROXY_URL" ]; then
+  json_edit "$CONFIG_FILE" ensure-plugin-options "$PROXY_URL"
+  echo "==> Proxy URL set to: $PROXY_URL"
 fi
 
 # 4. Clear cached copies of this package so the next start fetches the
@@ -126,14 +128,16 @@ echo "       opencode2 auth login"
 echo ""
 echo "     (pick LiteLLM and paste the key)"
 echo ""
-if [ -z "${LITELLM_BASE_URL:-}" ]; then
+if [ -z "$PROXY_URL" ]; then
   echo "  2. If your proxy is not at http://127.0.0.1:4000/v1, set the URL:"
   echo ""
   echo '       In '"$CONFIG_FILE"' change the plugins entry to:'
   echo '       { "package": "'"$PLUGIN_SPEC"'", "options": { "baseURL": "https://your-proxy/v1" } }'
   echo ""
+  echo "  3. Restart the service if OpenCode is running:"
+else
+  echo "  2. Restart the service if OpenCode is running:"
 fi
-echo "  3. Restart the service if OpenCode is running:"
 echo ""
 echo "       opencode2 service restart"
 echo ""

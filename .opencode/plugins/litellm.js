@@ -1,4 +1,4 @@
-import { userInfo } from "node:os"
+import { homedir, userInfo } from "node:os"
 import { appendFileSync, statSync, renameSync, unlinkSync } from "node:fs"
 
 /**
@@ -40,7 +40,7 @@ import { appendFileSync, statSync, renameSync, unlinkSync } from "node:fs"
  * (set LITELLM_PLUGIN_DEBUG to log to a custom path instead).
  */
 
-const VERSION = "1.2.1"
+const VERSION = "1.2.2"
 
 const DEFAULTS = {
   providerID: "litellm",
@@ -62,7 +62,10 @@ function osUsername() {
 }
 
 function dataDir() {
-  return `${process.env.HOME || process.env.USERPROFILE || "."}/.local/share/opencode`
+  // os.homedir() resolves $HOME on Unix and USERPROFILE on Windows —
+  // unlike process.env.HOME, which can hold a bogus MSYS-style path
+  // on Windows and silently break file logging.
+  return `${homedir()}/.local/share/opencode`
 }
 const LOG_FILE = process.env.LITELLM_PLUGIN_DEBUG
   ? (process.env.LITELLM_PLUGIN_DEBUG === "1"

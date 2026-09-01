@@ -23,18 +23,24 @@ It gives you a fully wired `litellm` provider with:
 One command (Linux/macOS/WSL):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/gianni-bischoff/opencode-litellm-plugin/main/install.sh | bash
+curl -fsSL "https://raw.githubusercontent.com/gianni-bischoff/opencode-litellm-plugin/main/install.sh?t=$(date +%s)" | bash
 ```
 
-If your proxy is not at the default `http://127.0.0.1:4000/v1`, pass its URL:
+If your proxy is not at the default `http://127.0.0.1:4000/v1`, pass its URL
+**as an argument** (env vars on the `curl` side of a pipe do not reach `bash`):
 
 ```bash
-LITELLM_BASE_URL=https://litellm.example.com/v1 \
-  curl -fsSL https://raw.githubusercontent.com/gianni-bischoff/opencode-litellm-plugin/main/install.sh | bash
+curl -fsSL "https://raw.githubusercontent.com/gianni-bischoff/opencode-litellm-plugin/main/install.sh?t=$(date +%s)" \
+  | bash -s -- https://litellm.example.com/v1
 ```
 
+The `?t=$(date +%s)` parameter only busts raw.githubusercontent's ~5-minute
+CDN cache so you always get the latest script.
+
 The installer runs `opencode2 plugin add`, adds the required
-`providers.litellm` block to your global config, and applies the proxy URL.
+`providers.litellm` block to your global config, applies the proxy URL, and
+clears previously cached copies of the plugin package — so **re-running it
+also updates the plugin to the latest version**.
 
 Then connect your key:
 
