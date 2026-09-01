@@ -83,17 +83,15 @@ requests (the plugin keeps its settings updated at runtime):
     "litellm": {
       "name": "LiteLLM",
       "env": ["LITELLM_API_KEY"],
-      "package": "@opencode-ai/ai/providers/openai-compatible",
-      "models": {
-        "placeholder": { "name": "placeholder" }
-      }
+      "package": "@opencode-ai/ai/providers/openai-compatible"
     }
   }
 }
 ```
 
-The `models` block only seeds a placeholder so the provider exists before
-the first discovery run; discovered models are added automatically.
+No `models` block is needed — the plugin adds the discovered models
+automatically. The `env` field is what makes LiteLLM appear in
+`/connect` and `opencode auth login`.
 
 ## How the proxy URL is resolved
 
