@@ -1,4 +1,5 @@
 import { userInfo } from "node:os"
+import { appendFileSync } from "node:fs"
 
 /**
  * OpenCode V2 plugin: LiteLLM proxy integration.
@@ -54,6 +55,18 @@ function osUsername() {
   return process.env.USER || process.env.USERNAME || undefined
 }
 
+const DEBUG_FILE = process.env.LITELLM_PLUGIN_DEBUG
+  ? (process.env.LITELLM_PLUGIN_DEBUG === "1"
+      ? `${process.env.HOME || process.env.USERPROFILE || "."}/.local/share/opencode/litellm-plugin-debug.log`
+      : process.env.LITELLM_PLUGIN_DEBUG)
+  : undefined
+function debug(message) {
+  if (!DEBUG_FILE) return
+  try {
+    appendFileSync(DEBUG_FILE, `${new Date().toISOString()} ${message}\n`)
+  } catch {}
+}
+
 export default {
   id: "litellm",
   async setup(ctx) {
@@ -100,10 +113,11 @@ export default {
       if (models.length > 0) catalog.model.remove(providerID, "placeholder")
     })
 
-    async function sync() {
+    async function sync(reason) {
       const credentialKey = await resolveCredential()
       if (credentialKey) apiKey = credentialKey
       if (options.apiKey) apiKey = options.apiKey
+      debug(`sync (${reason || "startup"}): key=${apiKey ? "set" : "unset"} baseURL=${baseURL}`)
 
       if (apiKey) {
         try {
@@ -119,12 +133,17 @@ export default {
           if (res.ok) {
             const json = await res.json()
             const data = Array.isArray(json && json.data) ? json.data : []
-            models = data
+            const discovered = data
               .map((m) => (m ? m.id : undefined))
               .filter((id) => typeof id === "string" && !!id)
               .filter((id) => !id.includes(options.exclude))
+            const added = discovered.filter((id) => !models.includes(id))
+            const removed = models.filter((id) => !discovered.includes(id))
+            models = discovered
+            debug(`sync (${reason || "startup"}): ${discovered.length} models (+${added.length} new, -${removed.length} gone)`)
           }
         } catch {
+          debug(`sync (${reason || "startup"}): fetch failed`)
           // network failures keep the previous model list
         }
       }
@@ -132,7 +151,7 @@ export default {
       await ctx.catalog.reload()
     }
 
-    await sync()
+    await sync("startup")
 
     if (options.sessionHeader) {
       await ctx.session.hook(
@@ -144,13 +163,38 @@ export default {
       )
     }
 
+    // Refresh when a new session starts (covers "opening OpenCode" against
+    // an already-running service). Throttled to at most once per 30 seconds.
+    const controller = new AbortController()
+    let lastSyncAt = Date.now()
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          if (
+            event &&
+            event.type === "session.created" &&
+            Date.now() - lastSyncAt >= 30_000
+          ) {
+            lastSyncAt = Date.now()
+            debug("event: session.created -> sync")
+            void sync("session.created").catch(() => {})
+          }
+        }
+      } catch {
+        // stream closed
+      }
+    })()
+
     const timer = setInterval(
       () => {
-        void sync().catch(() => {})
+        void sync("timer").catch(() => {})
       },
       Math.max(1, options.refreshMinutes) * 60_000,
     )
 
-    return () => clearInterval(timer)
+    return () => {
+      clearInterval(timer)
+      controller.abort()
+    }
   },
 }
