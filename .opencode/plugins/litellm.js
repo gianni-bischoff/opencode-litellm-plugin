@@ -82,6 +82,7 @@ export default {
     await ctx.catalog.transform((catalog) => {
       catalog.provider.update(providerID, (provider) => {
         provider.name = options.name
+        if (!provider.package) provider.package = "@opencode-ai/ai/providers/openai-compatible"
         if (!provider.settings) provider.settings = {}
         provider.settings.baseURL = baseURL
         if (apiKey) provider.settings.apiKey = apiKey
@@ -95,6 +96,8 @@ export default {
           model.name = id
         })
       }
+      // Drop the installer's placeholder seed once real models exist
+      if (models.length > 0) catalog.model.remove(providerID, "placeholder")
     })
 
     async function sync() {

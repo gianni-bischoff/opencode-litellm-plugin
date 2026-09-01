@@ -20,9 +20,21 @@ It gives you a fully wired `litellm` provider with:
 
 ## Install
 
+One command (Linux/macOS/WSL):
+
 ```bash
-opencode2 plugin add git+https://github.com/gianni-bischoff/opencode-litellm-plugin.git
+curl -fsSL https://raw.githubusercontent.com/gianni-bischoff/opencode-litellm-plugin/main/install.sh | bash
 ```
+
+If your proxy is not at the default `http://127.0.0.1:4000/v1`, pass its URL:
+
+```bash
+LITELLM_BASE_URL=https://litellm.example.com/v1 \
+  curl -fsSL https://raw.githubusercontent.com/gianni-bischoff/opencode-litellm-plugin/main/install.sh | bash
+```
+
+The installer runs `opencode2 plugin add`, adds the required
+`providers.litellm` block to your global config, and applies the proxy URL.
 
 Then connect your key:
 
@@ -30,15 +42,22 @@ Then connect your key:
 opencode auth login
 ```
 
-Pick **LiteLLM** and paste your LiteLLM proxy key. That is all — the plugin
+Pick **LiteLLM** and paste your LiteLLM proxy key. After a restart the plugin
 discovers your models automatically.
 
-## How the proxy URL is resolved
+> **The LiteLLM provider only appears in `/models` once a key is connected
+> and at least one model has been discovered.** No key → no models → no
+> visible provider.
 
-The plugin talks to `options.baseURL`, which defaults to
-`http://127.0.0.1:4000/v1` (LiteLLM's default port). If your proxy runs
-elsewhere, edit the `plugins` entry in `~/.config/opencode/opencode.json`
-to pass options:
+### Manual install (any OS)
+
+```bash
+opencode2 plugin add git+https://github.com/gianni-bischoff/opencode-litellm-plugin.git
+```
+
+Then add this block to `~/.config/opencode/opencode.json` (or
+`opencode.jsonc`) yourself — it registers the provider and makes LiteLLM
+appear in `/connect` / `opencode auth login`:
 
 ```jsonc
 {
@@ -75,6 +94,13 @@ requests (the plugin keeps its settings updated at runtime):
 
 The `models` block only seeds a placeholder so the provider exists before
 the first discovery run; discovered models are added automatically.
+
+## How the proxy URL is resolved
+
+The plugin talks to `options.baseURL`, which defaults to
+`http://127.0.0.1:4000/v1` (LiteLLM's default port). If your proxy runs
+elsewhere and you did not use `LITELLM_BASE_URL` with the installer, edit
+the `plugins` entry in `~/.config/opencode/opencode.json` to pass options:
 
 ## Options
 
