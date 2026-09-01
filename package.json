@@ -1,0 +1,24 @@
+{
+  "name": "opencode-litellm-plugin",
+  "version": "1.0.0",
+  "description": "OpenCode V2 plugin for LiteLLM proxies: automatic model discovery, provider wiring, and session headers",
+  "type": "module",
+  "main": ".opencode/plugins/litellm.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gianni-bischoff/opencode-litellm-plugin.git"
+  },
+  "keywords": [
+    "opencode",
+    "opencode2",
+    "litellm",
+    "llm-proxy",
+    "plugin"
+  ],
+  "license": "MIT",
+  "files": [
+    ".opencode",
+    "README.md",
+    "LICENSE"
+  ]
+}
