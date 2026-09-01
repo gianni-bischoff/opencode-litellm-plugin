@@ -121,6 +121,21 @@ With no options at all, every default applies.
 2. `options.apiKey`
 3. The `LITELLM_API_KEY` environment variable
 
+## Model refreshing
+
+Models are re-synced from the proxy:
+
+- at service start,
+- whenever a **new session starts** (opening OpenCode against a
+  already-running service), throttled to at most once per 30 seconds,
+- every `refreshMinutes` (default 5) as a fallback.
+
+Each sync also re-resolves the `/connect` credential, so a freshly
+connected key is picked up without a restart.
+
+Set `LITELLM_PLUGIN_DEBUG=1` in the service environment to write a debug
+log to `~/.local/share/opencode/litellm-plugin-debug.log`.
+
 ## Notes
 
 - The customer ID default changed value in v1.0.0: your OS username is used
