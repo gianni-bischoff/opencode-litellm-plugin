@@ -110,12 +110,21 @@ fi
 
 # 4. Clear cached copies of this package so the next start fetches the
 #    latest version (makes re-running this installer act as an update).
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/opencode/packages"
-if [ -d "$CACHE_DIR" ]; then
-  for d in "$CACHE_DIR"/git-*/; do
+#    Handles both cache layouts: the original packages/git-*/ and the
+#    newer npm/git-<name>-<hash>/ scheme used by recent opencode2 builds.
+CACHE_BASE="${XDG_CACHE_HOME:-$HOME/.cache}/opencode"
+if [ -d "$CACHE_BASE/packages" ]; then
+  for d in "$CACHE_BASE"/packages/git-*/; do
     [ -d "$d/node_modules/opencode-litellm-plugin" ] || continue
     rm -rf "$d"
-    echo "==> Cleared cached package copy (latest version downloads on next start)"
+    echo "==> Cleared cached package copy (packages layout)"
+  done
+fi
+if [ -d "$CACHE_BASE/npm" ]; then
+  for d in "$CACHE_BASE"/npm/git-opencode-litellm-plugin-*/; do
+    [ -d "$d" ] || continue
+    rm -rf "$d"
+    echo "==> Cleared cached package copy (npm layout)"
   done
 fi
 
