@@ -40,13 +40,13 @@ const money = (value) =>
 function countdown(resetAt) {
   const ms = Date.parse(resetAt) - Date.now()
   if (!Number.isFinite(ms)) return undefined
-  if (ms <= 0) return "resets soon"
+  if (ms <= 0) return "soon"
   const minutes = Math.round(ms / 60_000)
-  if (minutes < 60) return `${minutes}m left`
+  if (minutes < 60) return `${minutes}m`
   const hours = Math.floor(minutes / 60)
   const rest = minutes % 60
-  if (hours < 48) return `${hours}h ${rest}m left`
-  return `${Math.floor(hours / 24)}d ${hours % 24}h left`
+  if (hours < 48) return `${hours}h ${rest}m`
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`
 }
 
 export default Plugin.define({
@@ -88,12 +88,21 @@ export default Plugin.define({
       cleanups.push(
         ctx.ui.slot({
           append: "prompt.footer.status",
-          render: () => {
+          render: (input) => {
+            // Only while the active session is served by the litellm
+            // provider — hidden on the home screen and other providers.
+            const session = input?.sessionID
+              ? ctx.data.session.get(input.sessionID)
+              : undefined
+            if (session?.model?.providerID !== "litellm") {
+              return <text></text>
+            }
+
             const data = budget()
             if (!data) {
               return (
                 <text fg={colors.subdued}>
-                  {data === undefined ? " litellm budget — waiting for sync…" : ""}
+                  {data === undefined ? " budget…" : ""}
                 </text>
               )
             }
@@ -109,8 +118,7 @@ export default Plugin.define({
             if (limit !== undefined && limit > 0) {
               const ratio = spend / limit
               color = ratio >= 0.85 ? colors.danger : ratio >= 0.6 ? colors.warn : colors.ok
-              const percent = `${Math.round(ratio * 100)}%`
-              body = `${money(spend)} / ${money(limit)} (${percent})`
+              body = `${money(spend)} / ${money(limit)}`
               if (left) body += ` · ${left}`
 
               if (ratio >= 0.9 && data.resetAt && warnedWindow !== data.resetAt) {
@@ -118,9 +126,9 @@ export default Plugin.define({
                 try {
                   ctx.ui.toast.show({
                     title: "LiteLLM budget",
-                    message: `${money(spend)} of ${money(limit)} used (${percent})${
-                      left ? ` — ${left}` : ""
-                    }`,
+                    message: `${money(spend)} of ${money(limit)} used (${Math.round(
+                      ratio * 100,
+                    )}%)${left ? ` — ${left}` : ""}`,
                     variant: ratio >= 1 ? "error" : "warning",
                   })
                 } catch {}
@@ -130,12 +138,7 @@ export default Plugin.define({
               body = `${money(spend)} spent${left ? ` · ${left}` : ""}`
             }
 
-            return (
-              <box flexDirection="row">
-                <text fg={colors.subdued}> litellm </text>
-                <text fg={color}>{body}</text>
-              </box>
-            )
+            return <text fg={color}>{` ${body}`}</text>
           },
         }),
       )

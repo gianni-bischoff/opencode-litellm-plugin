@@ -168,16 +168,17 @@ curl -s https://your-proxy.example.com/v1/models \
 ## Budget display ($ spent / $ limit)
 
 If your LiteLLM key has a budget window (e.g. a $100/day cap on the key),
-the plugin shows it **live in the OpenCode status line**:
+the plugin shows it **live in the OpenCode status line** — but only while
+the active session is running a `litellm/*` model:
 
 ```
-~ litellm $45.82 / $100.00 (46%) · 11h 47m left
+~ $45.82 / $100.00 · 11h 47m
 ```
 
-- **$spent / $limit** of the current window, plus the used percentage
-- **time left** until the window resets (e.g. midnight UTC for `24h`)
+- **$spent / $limit** of the current window, plus **time until reset**
 - color-coded: green < 60%, yellow 60–85%, red ≥ 85%
 - a warning toast once per window when spending crosses 90%
+- hidden on the home screen and whenever another provider is active
 
 Requirements on the proxy side — grant the key two routes:
 
