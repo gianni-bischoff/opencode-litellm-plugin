@@ -158,24 +158,26 @@ export default {
     // ------------------------------------------------------------------
     let autoInfo = new Map() // model id -> { input?, output?, cacheRead?, cacheWrite?, context?, outputLimit? } (per-token USD)
 
+    // ModelCost in OpenCode's catalog is USD per 1M tokens (e.g.
+    // input 0.3 == $0.30 per million) — keep everything in that unit.
     function userCostFor(id, wildcard = false) {
       const pricing = options.pricing
       if (!pricing || typeof pricing !== "object") return undefined
       const entry = wildcard ? pricing["*"] : pricing[id]
       if (!entry || typeof entry !== "object") return undefined
-      const perToken = (value) => {
+      const perMillion = (value) => {
         const n = Number(value)
-        return Number.isFinite(n) && n >= 0 ? n / 1_000_000 : undefined
+        return Number.isFinite(n) && n >= 0 ? n : undefined
       }
-      const input = perToken(entry.input)
-      const output = perToken(entry.output)
+      const input = perMillion(entry.input)
+      const output = perMillion(entry.output)
       if (input === undefined && output === undefined) return undefined
       return {
         input: input ?? 0,
         output: output ?? 0,
         cache: {
-          read: perToken(entry.cacheRead) ?? 0,
-          write: perToken(entry.cacheWrite) ?? 0,
+          read: perMillion(entry.cacheRead) ?? 0,
+          write: perMillion(entry.cacheWrite) ?? 0,
         },
       }
     }
@@ -227,11 +229,16 @@ export default {
               const n = Number(value)
               return Number.isFinite(n) && n >= 0 ? n : undefined
             }
+            // LiteLLM reports per-token costs; OpenCode wants per 1M.
+            const perMillion = (value) => {
+              const n = num(value)
+              return n === undefined ? undefined : n * 1_000_000
+            }
             const entry = {
-              input: num(info.input_cost_per_token),
-              output: num(info.output_cost_per_token),
-              cacheRead: num(info.cache_read_input_token_cost),
-              cacheWrite: num(info.cache_creation_input_token_cost),
+              input: perMillion(info.input_cost_per_token),
+              output: perMillion(info.output_cost_per_token),
+              cacheRead: perMillion(info.cache_read_input_token_cost),
+              cacheWrite: perMillion(info.cache_creation_input_token_cost),
               context: num(info.max_input_tokens) ?? num(info.max_tokens),
               outputLimit: num(info.max_output_tokens),
             }
