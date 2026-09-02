@@ -54,7 +54,7 @@ import { appendFileSync, statSync, renameSync, unlinkSync } from "node:fs"
  * (set LITELLM_PLUGIN_DEBUG to log to a custom path instead).
  */
 
-const VERSION = "1.4.1"
+const VERSION = "1.4.2"
 
 const DEFAULTS = {
   providerID: "litellm",
@@ -200,72 +200,89 @@ export default {
     }
 
     async function fetchModelInfo(reason) {
-      const url = `${baseURL.replace(/\/$/, "")}/model/info`
       const key = options.infoKey || apiKey
       if (!key) return
-      try {
-        const res = await fetch(url, {
-          headers: {
-            Authorization: `Bearer ${key}`,
-            ...(options.customerID
-              ? { "x-litellm-customer-id": options.customerID }
-              : {}),
-          },
-          signal: AbortSignal.timeout(15_000),
-        })
-        if (res.ok) {
-          const json = await res.json()
-          const data = Array.isArray(json && json.data) ? json.data : []
-          const next = new Map()
-          for (const item of data) {
-            if (!item || typeof item !== "object") continue
-            const info =
-              item.model_info && typeof item.model_info === "object"
-                ? item.model_info
-                : item
-            const id = item.model_name || info.key || info.id
-            if (typeof id !== "string" || !id) continue
-            const num = (value) => {
-              const n = Number(value)
-              return Number.isFinite(n) && n >= 0 ? n : undefined
+      // LiteLLM management routes live at the proxy root, not under the
+      // OpenAI /v1 prefix — strip a trailing "/v1" from baseURL. The raw
+      // baseURL is tried as a fallback for exotic mounts.
+      const candidates = [...new Set([baseURL.replace(/\/v1\/?$/, ""), baseURL])].map(
+        (b) => `${b.replace(/\/$/, "")}/model/info`,
+      )
+
+      const headers = {
+        Authorization: `Bearer ${key}`,
+        ...(options.customerID
+          ? { "x-litellm-customer-id": options.customerID }
+          : {}),
+      }
+
+      let rejected = false
+      for (const url of candidates) {
+        try {
+          const res = await fetch(url, {
+            headers,
+            signal: AbortSignal.timeout(15_000),
+          })
+          if (res.ok) {
+            const json = await res.json()
+            const data = Array.isArray(json && json.data) ? json.data : []
+            const next = new Map()
+            for (const item of data) {
+              if (!item || typeof item !== "object") continue
+              const info =
+                item.model_info && typeof item.model_info === "object"
+                  ? item.model_info
+                  : item
+              const id = item.model_name || info.key || info.id
+              if (typeof id !== "string" || !id) continue
+              const num = (value) => {
+                const n = Number(value)
+                return Number.isFinite(n) && n >= 0 ? n : undefined
+              }
+              // LiteLLM reports per-token costs; OpenCode wants per 1M.
+              const perMillion = (value) => {
+                const n = num(value)
+                return n === undefined ? undefined : n * 1_000_000
+              }
+              const entry = {
+                input: perMillion(info.input_cost_per_token),
+                output: perMillion(info.output_cost_per_token),
+                cacheRead: perMillion(info.cache_read_input_token_cost),
+                cacheWrite: perMillion(info.cache_creation_input_token_cost),
+                context: num(info.max_input_tokens) ?? num(info.max_tokens),
+                outputLimit: num(info.max_output_tokens),
+              }
+              if (
+                entry.input !== undefined ||
+                entry.output !== undefined ||
+                entry.context !== undefined ||
+                entry.outputLimit !== undefined
+              ) {
+                next.set(id, entry)
+              }
             }
-            // LiteLLM reports per-token costs; OpenCode wants per 1M.
-            const perMillion = (value) => {
-              const n = num(value)
-              return n === undefined ? undefined : n * 1_000_000
-            }
-            const entry = {
-              input: perMillion(info.input_cost_per_token),
-              output: perMillion(info.output_cost_per_token),
-              cacheRead: perMillion(info.cache_read_input_token_cost),
-              cacheWrite: perMillion(info.cache_creation_input_token_cost),
-              context: num(info.max_input_tokens) ?? num(info.max_tokens),
-              outputLimit: num(info.max_output_tokens),
-            }
-            if (
-              entry.input !== undefined ||
-              entry.output !== undefined ||
-              entry.context !== undefined ||
-              entry.outputLimit !== undefined
-            ) {
-              next.set(id, entry)
-            }
+            autoInfo = next
+            log(`sync (${reason}): pricing/limits for ${next.size} models from ${url}`)
+            return
           }
-          autoInfo = next
-          log(`sync (${reason}): pricing/limits for ${next.size} models from /model/info`)
-        } else if (res.status === 401 || res.status === 403) {
-          if (autoInfo.size > 0) autoInfo = new Map()
-          log(
-            `sync (${reason}): /model/info rejected (${res.status}) — this key is not allowed the route. ` +
-              `Add "/model/info" to the key's routes on the proxy (or set options.infoKey). ` +
-              `Manual options.pricing is used meanwhile.`,
-          )
-        } else {
-          log(`sync (${reason}): GET /model/info -> ${res.status} ${res.statusText}`)
+          if (res.status === 401 || res.status === 403) {
+            rejected = true
+            continue
+          }
+          log(`sync (${reason}): GET ${url} -> ${res.status} ${res.statusText}`)
+          return
+        } catch (error) {
+          const message = error && error.message ? error.message : String(error)
+          log(`sync (${reason}): GET ${url} failed: ${message} (non-fatal)`)
         }
-      } catch (error) {
-        const message = error && error.message ? error.message : String(error)
-        log(`sync (${reason}): /model/info fetch failed: ${message} (non-fatal)`)
+      }
+      if (autoInfo.size > 0) autoInfo = new Map()
+      if (rejected) {
+        log(
+          `sync (${reason}): /model/info rejected — this key is not allowed the route. ` +
+            `Add "/model/info" to the key's routes on the proxy (or set options.infoKey). ` +
+            `Manual options.pricing is used meanwhile.`,
+        )
       }
     }
 
