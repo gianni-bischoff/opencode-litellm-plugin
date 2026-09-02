@@ -187,8 +187,10 @@ Requirements on the proxy side — grant the key two routes:
 
 Both are management routes; add them to the key's `routes` list (Admin UI
 → Keys → Edit → Routes) or via `/key/update`. The plugin logs a hint if a
-route is missing. The value refreshes on every sync (new sessions and a
-5-minute timer), pushed to all running OpenCode windows.
+route is missing. The value refreshes **right after every response
+finishes** (a couple of seconds later — LiteLLM commits spend just after
+the execution ends), on new sessions, and on a 5-minute timer; each
+refresh is pushed live to all running OpenCode windows.
 
 How it works: the server plugin (`.opencode/plugins/litellm.js`) reads
 `/key/info` on every sync and publishes the budget over OpenCode's plugin

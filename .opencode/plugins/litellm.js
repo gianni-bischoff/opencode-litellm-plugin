@@ -60,7 +60,7 @@ import { appendFileSync, statSync, renameSync, unlinkSync } from "node:fs"
  * (set LITELLM_PLUGIN_DEBUG to log to a custom path instead).
  */
 
-const VERSION = "1.5.2"
+const VERSION = "1.6.0"
 
 const DEFAULTS = {
   providerID: "litellm",
@@ -344,6 +344,8 @@ export default {
       log(`rpc register failed: ${message} (budget RPC unavailable, non-fatal)`)
     }
 
+    let lastBudgetFetchAt = 0
+
     async function publishBudget() {
       if (!budget || !rpc) return
       try {
@@ -353,9 +355,31 @@ export default {
       }
     }
 
+    // Message-driven refresh: after a response finishes, re-read the
+    // budget so the status line ticks up right away. Debounced (LiteLLM
+    // commits the spend a beat after the execution ends) and throttled
+    // (agentic loops finish many executions back to back).
+    const BUDGET_EVENT_DEBOUNCE_MS = 2_000
+    const BUDGET_EVENT_THROTTLE_MS = 15_000
+    let budgetDebounceTimer = undefined
+
+    function queueBudgetRefresh() {
+      clearTimeout(budgetDebounceTimer)
+      const sinceFetch = Date.now() - lastBudgetFetchAt
+      const wait = Math.max(
+        BUDGET_EVENT_DEBOUNCE_MS,
+        BUDGET_EVENT_THROTTLE_MS - sinceFetch,
+      )
+      budgetDebounceTimer = setTimeout(() => {
+        budgetDebounceTimer = undefined
+        void fetchBudget("message").catch(() => {})
+      }, wait)
+    }
+
     async function fetchBudget(reason) {
       const key = options.infoKey || apiKey
       if (!key) return
+      lastBudgetFetchAt = Date.now()
       const root = baseURL.replace(/\/v1\/?$/, "").replace(/\/$/, "")
       try {
         const res = await fetch(`${root}/key/info`, {
@@ -542,6 +566,14 @@ export default {
 
     // Refresh when a new session starts (covers "opening OpenCode" against
     // an already-running service). Throttled to at most once per 30 seconds.
+    // Also re-read the budget after every response finishes, so the status
+    // line ticks up right away (debounced + throttled inside
+    // queueBudgetRefresh).
+    const BUDGET_EVENT_TYPES = new Set([
+      "session.execution.succeeded",
+      "session.execution.failed",
+      "session.execution.interrupted",
+    ])
     const controller = new AbortController()
     let lastSyncAt = Date.now()
     void (async () => {
@@ -555,6 +587,9 @@ export default {
             lastSyncAt = Date.now()
             log("event: session.created -> sync")
             void sync("session.created").catch(() => {})
+          }
+          if (event && BUDGET_EVENT_TYPES.has(event.type)) {
+            queueBudgetRefresh()
           }
         }
       } catch {
@@ -571,6 +606,7 @@ export default {
 
     return () => {
       clearInterval(timer)
+      clearTimeout(budgetDebounceTimer)
       controller.abort()
     }
   },
