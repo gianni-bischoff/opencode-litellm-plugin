@@ -28,7 +28,10 @@ import { appendFileSync, statSync, renameSync, unlinkSync } from "node:fs"
  *                   (default: current OS username, falls back to $USER/$USERNAME)
  *   sessionHeader   Send x-litellm-session-id header (default true)
  *   refreshMinutes  How often to re-sync the model list (default 5)
- *   exclude         Substring filter for model IDs to skip (default ":")
+ *   exclude         Substring filter for model IDs to skip. Empty by
+ *                   default — empty excludes nothing, so all models the
+ *                   proxy serves are listed (e.g. set ":" to hide prefixed
+ *                   variants such as "hakan:glm-5.3")
  *   apiKey          Hardcoded API key (normally not needed)
  *   providerID      Provider/integration ID (default "litellm")
  *   name            Display name (default "LiteLLM")
@@ -40,7 +43,7 @@ import { appendFileSync, statSync, renameSync, unlinkSync } from "node:fs"
  * (set LITELLM_PLUGIN_DEBUG to log to a custom path instead).
  */
 
-const VERSION = "1.2.2"
+const VERSION = "1.3.0"
 
 const DEFAULTS = {
   providerID: "litellm",
@@ -49,7 +52,7 @@ const DEFAULTS = {
   customerID: undefined,
   sessionHeader: true,
   refreshMinutes: 5,
-  exclude: ":",
+  exclude: "",
   apiKey: undefined,
 }
 
@@ -190,7 +193,7 @@ export default {
           const discovered = data
             .map((m) => (m ? m.id : undefined))
             .filter((id) => typeof id === "string" && !!id)
-            .filter((id) => !id.includes(options.exclude))
+            .filter((id) => !options.exclude || !id.includes(options.exclude))
           const added = discovered.filter((id) => !models.includes(id))
           const removed = models.filter((id) => !discovered.includes(id))
           models = discovered

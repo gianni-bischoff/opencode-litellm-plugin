@@ -114,7 +114,7 @@ the `plugins` entry in `~/.config/opencode/opencode.json` to pass options:
 | `customerID`    | current OS username            | Value sent as `x-litellm-customer-id` header for spend attribution  |
 | `sessionHeader`  | `true`                         | Send `x-litellm-session-id` on every request                      |
 | `refreshMinutes` | `5`                            | Interval between model-list refreshes                             |
-| `exclude`        | `":"`                          | Skip model IDs containing this substring (e.g. prefixed variants) |
+| `exclude`        | `""` (empty)                   | Skip model IDs containing this substring. Empty excludes nothing — all models are listed (e.g. `":"` hides prefixed variants like `team:glm-5.2`) |
 | `apiKey`         | —                              | Hardcoded API key (prefer `/connect` or the env var instead)      |
 | `providerID`     | `"litellm"`                    | Provider/integration ID                                           |
 | `name`           | `"LiteLLM"`                    | Display name                                                      |
@@ -172,7 +172,8 @@ curl -s https://your-proxy.example.com/v1/models \
   budgets by customer ID, make sure a matching member exists (LiteLLM
   auto-creates unknown customer IDs by default).
 - `exclude: ":"` filters out colon-prefixed model IDs (e.g. `team:glm-5.2`
-  aliases) so only the canonical names appear.
+  aliases) so only the canonical names appear. The default is empty (no
+  filtering) since v1.3.0.
 
 ## License
 
