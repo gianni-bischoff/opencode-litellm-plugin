@@ -165,6 +165,49 @@ curl -s https://your-proxy.example.com/v1/models \
   -H "Authorization: Bearer sk-..." | head -c 300
 ```
 
+## Session cost & pricing
+
+OpenCode computes session costs from per-token model prices — with none set,
+`litellm/*` models show `$0.00` in `opencode2 stats --cost --models`. This
+plugin fills in prices from two sources:
+
+1. **Automatic — read from the proxy.** Every sync calls LiteLLM's
+   `/model/info` route and applies `input_cost_per_token`,
+   `output_cost_per_token`, cache costs, and context/output limits.
+   Regular virtual keys are usually restricted to `llm_api_routes`, so
+   grant your key the `/model/info` route on the proxy (Admin UI → Keys →
+   Edit → Routes, or the key's `routes` list), or set a dedicated
+   `infoKey` option:
+
+   ```jsonc
+   {
+     "package": "git+https://github.com/gianni-bischoff/opencode-litellm-plugin.git",
+     "options": {
+       "baseURL": "https://your-proxy/v1",
+       "infoKey": "sk-key-allowed-model-info"
+     }
+   }
+   ```
+
+2. **Manual `pricing` option** — USD per 1M tokens, used when the proxy
+   can't be read or to override it. Explicit per-model prices beat the
+   proxy's values; `"*"` fills any model with neither:
+
+   ```jsonc
+   "options": {
+     "pricing": {
+       "glm-5.2": { "input": 0.6, "output": 2.2, "cacheRead": 0.1 },
+       "*":       { "input": 1,   "output": 4 }
+     }
+   }
+   ```
+
+After prices are in place, check them with:
+
+```bash
+opencode2 stats --cost --models
+```
+
 ## Notes
 
 - The customer ID default changed value in v1.0.0: your OS username is used

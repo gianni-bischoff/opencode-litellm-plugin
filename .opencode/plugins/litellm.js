@@ -35,6 +35,17 @@ import { appendFileSync, statSync, renameSync, unlinkSync } from "node:fs"
  *   apiKey          Hardcoded API key (normally not needed)
  *   providerID      Provider/integration ID (default "litellm")
  *   name            Display name (default "LiteLLM")
+ *   pricing         Optional manual prices in USD per 1M tokens — used as a
+ *                   fallback for models whose price could not be read from
+ *                   the proxy, or as an explicit override:
+ *                     { "glm-5.2": { "input": 0.6, "output": 2.2 },
+ *                       "*":      { "input": 1,  "output": 4 } }
+ *                   Optional "cacheRead"/"cacheWrite" (per 1M tokens).
+ *   infoKey         Optional separate key allowed the /model/info route.
+ *                   When set (or when the main key can call it), per-token
+ *                   prices and context limits are read from the proxy
+ *                   automatically and power session costs
+ *                   (`opencode2 stats --cost`).
  *
  * With no options at all, every default above applies.
  *
@@ -43,7 +54,7 @@ import { appendFileSync, statSync, renameSync, unlinkSync } from "node:fs"
  * (set LITELLM_PLUGIN_DEBUG to log to a custom path instead).
  */
 
-const VERSION = "1.3.0"
+const VERSION = "1.4.0"
 
 const DEFAULTS = {
   providerID: "litellm",
@@ -54,6 +65,8 @@ const DEFAULTS = {
   refreshMinutes: 5,
   exclude: "",
   apiKey: undefined,
+  pricing: undefined,
+  infoKey: undefined,
 }
 
 function osUsername() {
@@ -132,6 +145,123 @@ export default {
       }
     }
 
+    // ------------------------------------------------------------------
+    // Pricing + limits
+    //
+    // Two sources, merged per model:
+    //   1. Manual `options.pricing` — USD per 1M tokens (human-friendly)
+    //   2. Auto-discovered from the proxy's /model/info route — USD per
+    //      token + context limits. Requires the key to be allowed that
+    //      route (regular virtual keys often only get llm_api_routes;
+    //      an optional `options.infoKey` can supply a dedicated key).
+    // Precedence: explicit per-model user price > proxy price > "*" entry.
+    // ------------------------------------------------------------------
+    let autoInfo = new Map() // model id -> { input?, output?, cacheRead?, cacheWrite?, context?, outputLimit? } (per-token USD)
+
+    function userCostFor(id, wildcard = false) {
+      const pricing = options.pricing
+      if (!pricing || typeof pricing !== "object") return undefined
+      const entry = wildcard ? pricing["*"] : pricing[id]
+      if (!entry || typeof entry !== "object") return undefined
+      const perToken = (value) => {
+        const n = Number(value)
+        return Number.isFinite(n) && n >= 0 ? n / 1_000_000 : undefined
+      }
+      const input = perToken(entry.input)
+      const output = perToken(entry.output)
+      if (input === undefined && output === undefined) return undefined
+      return {
+        input: input ?? 0,
+        output: output ?? 0,
+        cache: {
+          read: perToken(entry.cacheRead) ?? 0,
+          write: perToken(entry.cacheWrite) ?? 0,
+        },
+      }
+    }
+
+    function costFor(id) {
+      const user = userCostFor(id)
+      if (user) return user
+      const auto = autoInfo.get(id)
+      if (auto && (auto.input !== undefined || auto.output !== undefined)) {
+        return {
+          input: auto.input ?? 0,
+          output: auto.output ?? 0,
+          cache: {
+            read: auto.cacheRead ?? 0,
+            write: auto.cacheWrite ?? 0,
+          },
+        }
+      }
+      return userCostFor(id, true)
+    }
+
+    async function fetchModelInfo(reason) {
+      const url = `${baseURL.replace(/\/$/, "")}/model/info`
+      const key = options.infoKey || apiKey
+      if (!key) return
+      try {
+        const res = await fetch(url, {
+          headers: {
+            Authorization: `Bearer ${key}`,
+            ...(options.customerID
+              ? { "x-litellm-customer-id": options.customerID }
+              : {}),
+          },
+          signal: AbortSignal.timeout(15_000),
+        })
+        if (res.ok) {
+          const json = await res.json()
+          const data = Array.isArray(json && json.data) ? json.data : []
+          const next = new Map()
+          for (const item of data) {
+            if (!item || typeof item !== "object") continue
+            const info =
+              item.model_info && typeof item.model_info === "object"
+                ? item.model_info
+                : item
+            const id = item.model_name || info.key || info.id
+            if (typeof id !== "string" || !id) continue
+            const num = (value) => {
+              const n = Number(value)
+              return Number.isFinite(n) && n >= 0 ? n : undefined
+            }
+            const entry = {
+              input: num(info.input_cost_per_token),
+              output: num(info.output_cost_per_token),
+              cacheRead: num(info.cache_read_input_token_cost),
+              cacheWrite: num(info.cache_creation_input_token_cost),
+              context: num(info.max_input_tokens) ?? num(info.max_tokens),
+              outputLimit: num(info.max_output_tokens),
+            }
+            if (
+              entry.input !== undefined ||
+              entry.output !== undefined ||
+              entry.context !== undefined ||
+              entry.outputLimit !== undefined
+            ) {
+              next.set(id, entry)
+            }
+          }
+          autoInfo = next
+          log(`sync (${reason}): pricing/limits for ${next.size} models from /model/info`)
+        } else if (res.status === 401 || res.status === 403) {
+          if (autoInfo.size > 0) autoInfo = new Map()
+          log(
+            `sync (${reason}): /model/info rejected (${res.status}) — this key is not allowed the route. ` +
+              `Add "/model/info" to the key's routes on the proxy (or set options.infoKey). ` +
+              `Manual options.pricing is used meanwhile.`,
+          )
+        } else {
+          log(`sync (${reason}): GET /model/info -> ${res.status} ${res.statusText}`)
+        }
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error)
+        log(`sync (${reason}): /model/info fetch failed: ${message} (non-fatal)`)
+      }
+    }
+
     // Registered once; replayed on every catalog reload.
     await ctx.catalog.transform((catalog) => {
       catalog.provider.update(providerID, (provider) => {
@@ -148,6 +278,13 @@ export default {
       for (const id of models) {
         catalog.model.update(providerID, id, (model) => {
           model.name = id
+          const cost = costFor(id)
+          if (cost) model.cost = [cost]
+          const info = autoInfo.get(id)
+          if (info) {
+            if (info.context) model.limit.context = info.context
+            if (info.outputLimit) model.limit.output = info.outputLimit
+          }
         })
       }
       // Drop the installer's placeholder seed once real models exist
@@ -215,6 +352,9 @@ export default {
         )
         // network failures keep the previous model list
       }
+
+      // Pricing + context limits from the proxy (non-fatal on failure).
+      await fetchModelInfo(why)
 
       await ctx.catalog.reload()
     }
