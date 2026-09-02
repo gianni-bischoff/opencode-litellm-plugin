@@ -165,6 +165,41 @@ curl -s https://your-proxy.example.com/v1/models \
   -H "Authorization: Bearer sk-..." | head -c 300
 ```
 
+## Budget display ($ spent / $ limit)
+
+If your LiteLLM key has a budget window (e.g. a $100/day cap on the key),
+the plugin shows it **live in the OpenCode status line**:
+
+```
+~ litellm $45.82 / $100.00 (46%) · 11h 47m left
+```
+
+- **$spent / $limit** of the current window, plus the used percentage
+- **time left** until the window resets (e.g. midnight UTC for `24h`)
+- color-coded: green < 60%, yellow 60–85%, red ≥ 85%
+- a warning toast once per window when spending crosses 90%
+
+Requirements on the proxy side — grant the key two routes:
+
+1. `/model/info` — model prices and context limits (see above)
+2. `/key/info` — the key's budget: spend, limit, reset time
+
+Both are management routes; add them to the key's `routes` list (Admin UI
+→ Keys → Edit → Routes) or via `/key/update`. The plugin logs a hint if a
+route is missing. The value refreshes on every sync (new sessions and a
+5-minute timer), pushed to all running OpenCode windows.
+
+How it works: the server plugin (`.opencode/plugins/litellm.js`) reads
+`/key/info` on every sync and publishes the budget over OpenCode's plugin
+RPC (method `budget` + event `budget`). The TUI widget (`tui.tsx`, same
+package, loaded automatically) fetches it on startup and live-updates.
+No plugin options are needed. To hide the widget, disable the plugin id
+`litellm-budget` in `tui.json`:
+
+```jsonc
+{ "plugin_enabled": { "litellm-budget": false } }
+```
+
 ## Session cost & pricing
 
 OpenCode computes session costs from per-token model prices — with none set,

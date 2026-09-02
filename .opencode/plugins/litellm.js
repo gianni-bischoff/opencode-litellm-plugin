@@ -47,6 +47,12 @@ import { appendFileSync, statSync, renameSync, unlinkSync } from "node:fs"
  *                   automatically and power session costs
  *                   (`opencode2 stats --cost`).
  *
+ * Budget display: when the key is also allowed the /key/info route, the
+ * plugin reads the LiteLLM key budget (e.g. $100/day) on every sync and
+ * publishes it over plugin RPC (method "budget", event "budget"). The
+ * TUI widget in ./tui.tsx (same package) renders "$spent / $limit · time
+ * left" in the status line, color-coded, with a warning toast at 90%.
+ *
  * With no options at all, every default above applies.
  *
  * Diagnostics: every sync is logged to
@@ -54,7 +60,7 @@ import { appendFileSync, statSync, renameSync, unlinkSync } from "node:fs"
  * (set LITELLM_PLUGIN_DEBUG to log to a custom path instead).
  */
 
-const VERSION = "1.4.2"
+const VERSION = "1.5.0"
 
 const DEFAULTS = {
   providerID: "litellm",
@@ -286,6 +292,142 @@ export default {
       }
     }
 
+    // ------------------------------------------------------------------
+    // Budget window (LiteLLM key budget, e.g. a $100/day cap)
+    //
+    // Read from the proxy's /key/info route on every sync. The key must
+    // be allowed that route (like /model/info). The current value is:
+    //   - kept in plugin storage ("budget")
+    //   - served over plugin RPC (method "budget")
+    //   - pushed to TUI clients (event "rpc.litellm.budget")
+    // so the status-line widget in ./tui.tsx can render "$spent / $limit".
+    // ------------------------------------------------------------------
+    let budget = undefined // { spend, maxBudget, resetAt, duration, keyAlias, updatedAt }
+
+    const budgetSchema = {
+      type: "object",
+      properties: {
+        spend: { type: "number" },
+        maxBudget: { type: ["number", "null"] },
+        resetAt: { type: ["string", "null"] },
+        duration: { type: ["string", "null"] },
+        keyAlias: { type: ["string", "null"] },
+        updatedAt: { type: "string" },
+      },
+      required: ["spend", "updatedAt"],
+    }
+
+    let rpc = undefined
+    try {
+      rpc = await ctx.rpc.register(
+        {
+          id: "litellm",
+          methods: {
+            budget: {
+              input: { type: "object", properties: {}, additionalProperties: false },
+              output: budgetSchema,
+            },
+          },
+          events: {
+            budget: { schema: budgetSchema },
+          },
+        },
+        {
+          budget: async () => {
+            if (!budget) throw new Error("no budget data yet — /key/info not read or not granted")
+            return budget
+          },
+        },
+      )
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error)
+      log(`rpc register failed: ${message} (budget RPC unavailable, non-fatal)`)
+    }
+
+    async function publishBudget() {
+      if (!budget || !rpc) return
+      try {
+        await rpc.events.emit("budget", budget)
+      } catch {
+        // no subscriber / transport hiccup — storage still has the value
+      }
+    }
+
+    async function fetchBudget(reason) {
+      const key = options.infoKey || apiKey
+      if (!key) return
+      const root = baseURL.replace(/\/v1\/?$/, "").replace(/\/$/, "")
+      try {
+        const res = await fetch(`${root}/key/info`, {
+          headers: {
+            Authorization: `Bearer ${key}`,
+            ...(options.customerID
+              ? { "x-litellm-customer-id": options.customerID }
+              : {}),
+          },
+          signal: AbortSignal.timeout(15_000),
+        })
+        if (res.ok) {
+          const json = await res.json()
+          const info =
+            json && json.info && typeof json.info === "object" ? json.info : json
+          const num = (value) => {
+            const n = Number(value)
+            return Number.isFinite(n) && n >= 0 ? n : undefined
+          }
+          const limit =
+            Array.isArray(info.budget_limits) && info.budget_limits[0]
+              ? info.budget_limits[0]
+              : {}
+          const maxBudget = num(limit.max_budget) ?? num(info.max_budget)
+          const spend = num(info.spend)
+          if (spend === undefined && maxBudget === undefined) {
+            log(`sync (${reason}): /key/info ok but the key has no budget window`)
+            return
+          }
+          budget = {
+            spend: spend ?? 0,
+            maxBudget: maxBudget ?? null,
+            resetAt:
+              typeof limit.reset_at === "string"
+                ? limit.reset_at
+                : typeof info.budget_reset_at === "string"
+                  ? info.budget_reset_at
+                  : null,
+            duration:
+              typeof limit.budget_duration === "string"
+                ? limit.budget_duration
+                : typeof info.budget_duration === "string"
+                  ? info.budget_duration
+                  : null,
+            keyAlias: typeof info.key_alias === "string" ? info.key_alias : null,
+            updatedAt: new Date().toISOString(),
+          }
+          try {
+            await ctx.storage.set("budget", budget)
+          } catch {
+            // storage unavailable in this build — RPC still serves it
+          }
+          await publishBudget()
+          const limitText =
+            budget.maxBudget !== null ? ` / $${budget.maxBudget.toFixed(2)}` : ""
+          const resetText = budget.resetAt ? ` — resets ${budget.resetAt}` : ""
+          log(
+            `sync (${reason}): budget $${budget.spend.toFixed(2)}${limitText}${resetText}`,
+          )
+        } else if (res.status === 401 || res.status === 403) {
+          log(
+            `sync (${reason}): /key/info rejected (${res.status}) — grant the key the /key/info route to enable the budget display`,
+          )
+        } else {
+          log(`sync (${reason}): GET /key/info -> ${res.status} ${res.statusText}`)
+        }
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error)
+        log(`sync (${reason}): /key/info fetch failed: ${message} (non-fatal)`)
+      }
+    }
+
     // Registered once; replayed on every catalog reload.
     await ctx.catalog.transform((catalog) => {
       catalog.provider.update(providerID, (provider) => {
@@ -379,6 +521,9 @@ export default {
 
       // Pricing + context limits from the proxy (non-fatal on failure).
       await fetchModelInfo(why)
+
+      // Budget window from the proxy (non-fatal on failure).
+      await fetchBudget(why)
 
       await ctx.catalog.reload()
     }
