@@ -54,7 +54,7 @@ import { appendFileSync, statSync, renameSync, unlinkSync } from "node:fs"
  * (set LITELLM_PLUGIN_DEBUG to log to a custom path instead).
  */
 
-const VERSION = "1.4.0"
+const VERSION = "1.4.1"
 
 const DEFAULTS = {
   providerID: "litellm",
