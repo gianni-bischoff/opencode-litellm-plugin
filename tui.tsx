@@ -4,7 +4,7 @@
 // (npm/git installs). Renders the LiteLLM key budget — "$spent / $limit"
 // with a reset countdown — into the prompt footer status line, and warns
 // once per budget window when spending crosses 90%.
-import { Plugin } from "@opencode-ai/plugin/tui"
+import { Plugin } from "@opencode/plugin/tui"
 import { createSignal } from "solid-js"
 
 const budgetSchema = {
