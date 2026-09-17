@@ -53,7 +53,7 @@ if action == "add-provider":
         providers["litellm"] = {
             "name": "LiteLLM",
             "env": ["LITELLM_API_KEY"],
-            "package": "@opencode-ai/ai/providers/openai-compatible",
+            "package": "@opencode/ai/providers/openai-compatible",
         }
         changed = True
 elif action == "ensure-plugin-options":

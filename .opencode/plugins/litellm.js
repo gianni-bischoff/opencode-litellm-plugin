@@ -7,7 +7,7 @@ import { appendFileSync, statSync, renameSync, unlinkSync } from "node:fs"
  * Responsibilities:
  *  - Auto-discovers models from the proxy's /models endpoint and
  *    registers them on the "litellm" provider.
- *  - Keeps the provider catalog entry (baseURL, apiKey, headers) in sync
+ *  - Keeps the provider entry (baseURL, apiKey, headers) in sync
  *    with the effective configuration.
  *  - Adds an x-litellm-session-id header to every LiteLLM request.
  *  - Re-syncs every `refreshMinutes` so models added on the proxy
@@ -60,7 +60,7 @@ import { appendFileSync, statSync, renameSync, unlinkSync } from "node:fs"
  * (set LITELLM_PLUGIN_DEBUG to log to a custom path instead).
  */
 
-const VERSION = "1.6.0"
+const VERSION = "1.7.0"
 
 const DEFAULTS = {
   providerID: "litellm",
@@ -126,8 +126,9 @@ export default {
     rotateLogIfNeeded()
     log(`litellm plugin v${VERSION} loaded (providerID=${providerID}, baseURL=${options.baseURL})`)
 
-    // Mutable state captured by the catalog transform. sync() updates it
-    // and triggers a reload so the transform replays with fresh values.
+    // Mutable state captured by the provider/model transforms. sync()
+    // updates it and triggers a reload so the transforms replay with
+    // fresh values.
     let baseURL = options.baseURL
     let apiKey = options.apiKey || process.env.LITELLM_API_KEY
     let keySource = options.apiKey
@@ -452,21 +453,86 @@ export default {
       }
     }
 
-    // Registered once; replayed on every catalog reload.
-    await ctx.catalog.transform((catalog) => {
-      catalog.provider.update(providerID, (provider) => {
-        provider.name = options.name
-        if (!provider.package) provider.package = "@opencode-ai/ai/providers/openai-compatible"
-        if (!provider.settings) provider.settings = {}
-        provider.settings.baseURL = baseURL
-        if (apiKey) provider.settings.apiKey = apiKey
-        if (options.customerID) {
-          if (!provider.headers) provider.headers = {}
-          provider.headers["x-litellm-customer-id"] = options.customerID
+    // Registered once; replayed on every provider/model reload.
+    //
+    // The provider transform contributes the "litellm" source definition
+    // (settings, headers) and its model inventory; the model transform
+    // re-applies pricing and limits to the active candidates. Both capture
+    // the mutable sync() state and stay cheap and repeatable.
+    function modelRecord(id) {
+      const record = {
+        id,
+        modelID: id,
+        providerID,
+        name: id,
+        capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+        variants: [],
+        time: { released: 0 },
+        cost: [],
+        status: "active",
+        enabled: true,
+        limit: { context: 200_000, output: 32_000 },
+      }
+      const cost = costFor(id)
+      if (cost) record.cost = [cost]
+      const info = autoInfo.get(id)
+      if (info) {
+        if (info.context) record.limit.context = info.context
+        if (info.outputLimit) record.limit.output = info.outputLimit
+      }
+      return record
+    }
+
+    await ctx.provider.transform((editor) => {
+      const existing = editor.get(providerID)
+      if (existing) {
+        editor.update(providerID, (provider) => {
+          provider.name = options.name
+          if (!provider.package) provider.package = "@opencode/ai/providers/openai-compatible"
+          if (!provider.settings) provider.settings = {}
+          provider.settings.baseURL = baseURL
+          if (apiKey) provider.settings.apiKey = apiKey
+          if (options.customerID) {
+            if (!provider.headers) provider.headers = {}
+            provider.headers["x-litellm-customer-id"] = options.customerID
+          }
+        })
+        // Source model definitions are immutable records: rebuild the
+        // inventory as proxy models plus any config-defined static models
+        // (an empty discovery list keeps the previous inventory, e.g.
+        // after a network failure).
+        if (models.length > 0) {
+          const kept = []
+          for (const [id, info] of existing.models) {
+            if (!models.includes(id)) kept.push(info)
+          }
+          editor.models.set(providerID, [...kept, ...models.map(modelRecord)])
         }
-      })
+      } else {
+        // No providers.litellm config block: register the provider so the
+        // model list and auth flow can discover it.
+        editor.add({
+          info: {
+            id: providerID,
+            name: options.name,
+            activation: "enabled",
+            package: "@opencode/ai/providers/openai-compatible",
+            settings: { baseURL, ...(apiKey ? { apiKey } : {}) },
+            ...(options.customerID
+              ? { headers: { "x-litellm-customer-id": options.customerID } }
+              : {}),
+          },
+          models: models.map(modelRecord),
+        })
+      }
+    })
+
+    // Re-applies name/cost/limits to the active candidates on every replay
+    // (covers provider inventory coming from config rather than models.set).
+    await ctx.model.transform((editor) => {
+      if (!editor.provider.get(providerID)) return
       for (const id of models) {
-        catalog.model.update(providerID, id, (model) => {
+        editor.update(providerID, id, (model) => {
           model.name = id
           const cost = costFor(id)
           if (cost) model.cost = [cost]
@@ -478,7 +544,9 @@ export default {
         })
       }
       // Drop the installer's placeholder seed once real models exist
-      if (models.length > 0) catalog.model.remove(providerID, "placeholder")
+      if (models.length > 0 && editor.get(providerID, "placeholder")) {
+        editor.remove(providerID, "placeholder")
+      }
     })
 
     async function sync(reason) {
@@ -499,7 +567,7 @@ export default {
             `run "opencode2 auth login" and pick LiteLLM, ` +
             `or set options.apiKey, or export LITELLM_API_KEY`,
         )
-        await ctx.catalog.reload()
+        await ctx.provider.reload()
         return
       }
 
@@ -549,7 +617,7 @@ export default {
       // Budget window from the proxy (non-fatal on failure).
       await fetchBudget(why)
 
-      await ctx.catalog.reload()
+      await ctx.provider.reload()
     }
 
     await sync("startup")

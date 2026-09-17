@@ -1,6 +1,6 @@
 {
   "name": "opencode-litellm-plugin",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "OpenCode V2 plugin for LiteLLM proxies: automatic model discovery, provider wiring, and session headers",
   "type": "module",
   "main": ".opencode/plugins/litellm.js",
@@ -28,7 +28,7 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@opencode/plugin": "0.0.0-beta-19425",
+    "@opencode/plugin": "^2.0.6",
     "@opentui/core": "^0.5.10",
     "@opentui/solid": "^0.5.10",
     "solid-js": "^1.9.12"
