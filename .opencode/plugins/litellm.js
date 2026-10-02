@@ -6,6 +6,7 @@ import {
   log,
   sync,
   budgetSchema,
+  configOptionsFallback,
 } from "./litellm-core.js"
 
 /**
@@ -35,7 +36,11 @@ import {
 export default {
   id: "litellm",
   async setup(ctx) {
-    const state = createEngine(ctx)
+    // Some released OpenCode 2.x loaders (e.g. the V2 catalog form loaded
+    // from the plural "plugins" key) drop the entry's options — recover
+    // baseURL/apiKey/etc. from the config files / LITELLM_BASE_URL env.
+    const explicit = ctx?.options?.baseURL || ctx?.options?.apiKey ? ctx.options : undefined
+    const state = createEngine(ctx, explicit ?? configOptionsFallback())
     const options = state.options
     const providerID = state.providerID
 

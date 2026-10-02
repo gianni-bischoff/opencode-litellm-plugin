@@ -1,5 +1,5 @@
 import { homedir, userInfo } from "node:os"
-import { appendFileSync, statSync, renameSync, unlinkSync } from "node:fs"
+import { appendFileSync, statSync, renameSync, unlinkSync, readFileSync } from "node:fs"
 
 /**
  * Shared engine for the LiteLLM OpenCode plugin.
@@ -16,7 +16,7 @@ import { appendFileSync, statSync, renameSync, unlinkSync } from "node:fs"
  * Both share state (models, prices, budget) and the sync() logic below.
  */
 
-export const VERSION = "1.8.0"
+export const VERSION = "1.8.1"
 
 export const DEFAULTS = {
   providerID: "litellm",
@@ -299,9 +299,68 @@ export async function fetchBudget(state, reason) {
 // Creates the shared mutable state and returns it. Entry files call
 // sync()/etc. directly against it.
 // ---------------------------------------------------------------------
+// A local path spec points at a checkout — match it by its package.json name.
+function looksLikeThisPackage(spec) {
+  try {
+    const pkg = JSON.parse(readFileSync(`${spec}/package.json`, "utf8"))
+    return pkg?.name === "opencode-litellm-plugin"
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Recover this package's options from the OpenCode config files (and, as a
+ * last resort, LITELLM_BASE_URL). Needed because some released OpenCode 2.x
+ * loaders invoke the config plugin without forwarding the entry's options
+ * (e.g. the V2 catalog form loaded from the plural "plugins" key), even
+ * though options like baseURL were written right next to the package spec.
+ */
+export function configOptionsFallback() {
+  try {
+    const dir = process.env.XDG_CONFIG_HOME || `${homedir()}/.config`
+    for (const name of ["opencode.json", "opencode.jsonc"]) {
+      let text
+      try {
+        text = readFileSync(`${dir}/opencode/${name}`, "utf8")
+      } catch {
+        continue
+      }
+      const cleaned = text
+        .replace(/^[ \t]*\/\/[^\n]*/gm, "")   // full-line // comments
+        .replace(/\/\*[\s\S]*?\*\//g, "")      // block comments
+      let cfg
+      try {
+        cfg = JSON.parse(cleaned)
+      } catch {
+        continue
+      }
+      for (const list of [cfg.plugin, cfg.plugins]) {
+        if (!Array.isArray(list)) continue
+        for (const entry of list) {
+          const spec = Array.isArray(entry) ? entry[0] : entry?.package
+          const opts = Array.isArray(entry) ? entry[1] : entry?.options
+          if (typeof spec !== "string" || !opts || typeof opts !== "object") continue
+          if (spec.includes("opencode-litellm-plugin") || looksLikeThisPackage(spec)) {
+            return opts
+          }
+        }
+      }
+    }
+  } catch {}
+  if (process.env.LITELLM_BASE_URL) return { baseURL: process.env.LITELLM_BASE_URL }
+  return undefined
+}
+
 export function createEngine(ctx, optionsArg) {
-  const options = { ...DEFAULTS, ...(optionsArg ?? ctx?.options ?? {}) }
+  const source = optionsArg ?? ctx?.options
+  const options = { ...DEFAULTS, ...source }
   options.customerID ??= osUsername()
+  if (!source?.baseURL && process.env.LITELLM_BASE_URL) {
+    // Documented fallback for installs where no options reached the plugin
+    // (install.sh honors LITELLM_BASE_URL the same way).
+    options.baseURL = process.env.LITELLM_BASE_URL
+  }
 
   let baseURL = options.baseURL
   let apiKey = options.apiKey || process.env.LITELLM_API_KEY

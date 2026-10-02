@@ -116,6 +116,10 @@ Notes for released builds:
   provider registry once; the TUI model list refreshes live).
 - The API key is taken from `LITELLM_API_KEY`, `options.apiKey`, or the
   tuple's options — the `/connect` credential works on V2-style builds.
+- Some released builds drop the `options` object when loading the
+  catalog plugin from the plural `plugins` key. The plugin then recovers
+  `baseURL` (and the other options) from the config files itself, or
+  from the `LITELLM_BASE_URL` environment variable as a last resort.
 
 ## How the proxy URL is resolved
 

@@ -1,6 +1,3 @@
-import os from "node:os"
-import { readFileSync } from "node:fs"
-
 import {
   VERSION,
   rotateLogIfNeeded,
@@ -8,6 +5,7 @@ import {
   costFor,
   log,
   sync,
+  configOptionsFallback,
 } from "./litellm-core.js"
 
 /**
@@ -37,52 +35,6 @@ import {
  * Options (from the `["<plugin>", { ... }]` config tuple) are the same as
  * for litellm.js — baseURL, apiKey, pricing, exclude, infoKey, …
  */
-
-function configOptionsFallback() {
-  try {
-    const dir = process.env.XDG_CONFIG_HOME || `${os.homedir()}/.config`
-    for (const name of ["opencode.json", "opencode.jsonc"]) {
-      let text
-      try {
-        text = readFileSync(`${dir}/opencode/${name}`, "utf8")
-      } catch {
-        continue
-      }
-      const cleaned = text
-        .replace(/^[ \t]*\/\/[^\n]*/gm, "")   // full-line // comments
-        .replace(/\/\*[\s\S]*?\*\//g, "")      // block comments
-      let cfg
-      try {
-        cfg = JSON.parse(cleaned)
-      } catch {
-        continue
-      }
-      for (const list of [cfg.plugin, cfg.plugins]) {
-        if (!Array.isArray(list)) continue
-        for (const entry of list) {
-          const spec = Array.isArray(entry) ? entry[0] : entry?.package
-          const opts = Array.isArray(entry) ? entry[1] : entry?.options
-          if (typeof spec !== "string" || !opts || typeof opts !== "object") continue
-          if (spec.includes("opencode-litellm-plugin") || looksLikeThisPackage(spec)) {
-            return opts
-          }
-        }
-      }
-    }
-  } catch {}
-  if (process.env.LITELLM_BASE_URL) return { baseURL: process.env.LITELLM_BASE_URL }
-  return undefined
-}
-
-// A local path spec points at a checkout — match it by its package.json name.
-function looksLikeThisPackage(spec) {
-  try {
-    const pkg = JSON.parse(readFileSync(`${spec}/package.json`, "utf8"))
-    return pkg?.name === "opencode-litellm-plugin"
-  } catch {
-    return false
-  }
-}
 
 export default async function litellmHooks(ctx, optionsArg) {
   const state = createEngine(ctx, optionsArg ?? configOptionsFallback())
