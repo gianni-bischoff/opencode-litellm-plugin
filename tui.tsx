@@ -34,6 +34,11 @@ const definition = {
   },
 }
 
+// Released OpenCode 2.x TUI plugin loader expects { id?, tui(api, opts) }.
+// Plugin RPC is not part of that build's contract, so the budget widget
+// stays hidden there; the define-shaped path keeps working on V2 builds.
+const noopTui = async () => {}
+
 const money = (value) =>
   `$${Number(value).toFixed(2)}`
 
@@ -49,7 +54,7 @@ function countdown(resetAt) {
   return `${Math.floor(hours / 24)}d ${hours % 24}h`
 }
 
-export default Plugin.define({
+const defined = Plugin.define({
   id: "litellm-budget",
   setup(ctx) {
     const theme = ctx.theme
@@ -155,3 +160,7 @@ export default Plugin.define({
     }
   },
 })
+
+export default defined && typeof defined === "object"
+  ? Object.defineProperty(defined, "tui", { value: noopTui, configurable: true })
+  : { id: "litellm-budget", tui: noopTui }

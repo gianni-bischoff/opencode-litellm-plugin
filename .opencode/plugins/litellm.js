@@ -1,358 +1,93 @@
-import { homedir, userInfo } from "node:os"
-import { appendFileSync, statSync, renameSync, unlinkSync } from "node:fs"
+import {
+  VERSION,
+  rotateLogIfNeeded,
+  createEngine,
+  costFor,
+  log,
+  sync,
+  budgetSchema,
+} from "./litellm-core.js"
 
 /**
- * OpenCode V2 plugin: LiteLLM proxy integration.
+ * OpenCode V2 server plugin: LiteLLM proxy integration.
+ *
+ * Loads as a config plugin (default export `{ id, setup }`) on V2-style
+ * plugin API builds:
+ *   - Older V2 builds pass a ctx with `provider`/`model` transforms,
+ *     `rpc`, `session`, `event` and `storage` — all used when present.
+ *   - Released OpenCode 2.x passes `catalog` / `integration` hooks — the
+ *     discovered models are registered on the V2 catalog, which powers
+ *     the model list (`/api/model`) and session-cost pricing.
  *
  * Responsibilities:
  *  - Auto-discovers models from the proxy's /models endpoint and
  *    registers them on the "litellm" provider.
- *  - Keeps the provider entry (baseURL, apiKey, headers) in sync
- *    with the effective configuration.
- *  - Adds an x-litellm-session-id header to every LiteLLM request.
+ *  - Keeps the provider entry (base URL, API key, headers) in sync.
  *  - Re-syncs every `refreshMinutes` so models added on the proxy
  *    appear automatically.
+ *  - Reads proxy pricing (`/model/info`) and the key budget (`/key/info`).
  *
- * API key resolution order:
- *   1. The /connect credential (via `opencode2 auth login` / TUI)
- *   2. options.apiKey (hardcoded)
- *   3. LITELLM_API_KEY environment variable
- *
- * Base URL resolution order:
- *   1. options.baseURL
- *   2. http://127.0.0.1:4000/v1 (LiteLLM proxy default port)
- *
- * Options (in the opencode.json "plugins" entry):
- *   baseURL         Proxy base URL (default http://127.0.0.1:4000/v1)
- *   customerID      Value for the x-litellm-customer-id header
- *                   (default: current OS username, falls back to $USER/$USERNAME)
- *   sessionHeader   Send x-litellm-session-id header (default true)
- *   refreshMinutes  How often to re-sync the model list (default 5)
- *   exclude         Substring filter for model IDs to skip. Empty by
- *                   default — empty excludes nothing, so all models the
- *                   proxy serves are listed (e.g. set ":" to hide prefixed
- *                   variants such as "hakan:glm-5.3")
- *   apiKey          Hardcoded API key (normally not needed)
- *   providerID      Provider/integration ID (default "litellm")
- *   name            Display name (default "LiteLLM")
- *   pricing         Optional manual prices in USD per 1M tokens — used as a
- *                   fallback for models whose price could not be read from
- *                   the proxy, or as an explicit override:
- *                     { "glm-5.2": { "input": 0.6, "output": 2.2 },
- *                       "*":      { "input": 1,  "output": 4 } }
- *                   Optional "cacheRead"/"cacheWrite" (per 1M tokens).
- *   infoKey         Optional separate key allowed the /model/info route.
- *                   When set (or when the main key can call it), per-token
- *                   prices and context limits are read from the proxy
- *                   automatically and power session costs
- *                   (`opencode2 stats --cost`).
- *
- * Budget display: when the key is also allowed the /key/info route, the
- * plugin reads the LiteLLM key budget (e.g. $100/day) on every sync and
- * publishes it over plugin RPC (method "budget", event "budget"). The
- * TUI widget in ./tui.tsx (same package) renders "$spent / $limit · time
- * left" in the status line, color-coded, with a warning toast at 90%.
- *
- * With no options at all, every default above applies.
- *
- * Diagnostics: every sync is logged to
- *   ~/.local/share/opencode/litellm-plugin.log
- * (set LITELLM_PLUGIN_DEBUG to log to a custom path instead).
+ * The function-form V1 entrypoint (litellm-hooks.js) is what makes
+ * sessions use these models on released OpenCode 2.x; install.sh seeds
+ * both.
  */
-
-const VERSION = "1.7.0"
-
-const DEFAULTS = {
-  providerID: "litellm",
-  name: "LiteLLM",
-  baseURL: "http://127.0.0.1:4000/v1",
-  customerID: undefined,
-  sessionHeader: true,
-  refreshMinutes: 5,
-  exclude: "",
-  apiKey: undefined,
-  pricing: undefined,
-  infoKey: undefined,
-}
-
-function osUsername() {
-  try {
-    const name = userInfo().username
-    if (name) return name
-  } catch {}
-  return process.env.USER || process.env.USERNAME || undefined
-}
-
-function dataDir() {
-  // os.homedir() resolves $HOME on Unix and USERPROFILE on Windows —
-  // unlike process.env.HOME, which can hold a bogus MSYS-style path
-  // on Windows and silently break file logging.
-  return `${homedir()}/.local/share/opencode`
-}
-const LOG_FILE = process.env.LITELLM_PLUGIN_DEBUG
-  ? (process.env.LITELLM_PLUGIN_DEBUG === "1"
-      ? `${dataDir()}/litellm-plugin.log`
-      : process.env.LITELLM_PLUGIN_DEBUG)
-  : `${dataDir()}/litellm-plugin.log`
-
-function log(message) {
-  try {
-    appendFileSync(LOG_FILE, `${new Date().toISOString()} ${message}\n`)
-  } catch {}
-}
-
-// Keep the log from growing without bound: rotate once when it passes 256 KB.
-let logRotated = false
-function rotateLogIfNeeded() {
-  try {
-    if (logRotated) return
-    logRotated = true
-    if (statSync(LOG_FILE).size > 256 * 1024) {
-      try {
-        unlinkSync(`${LOG_FILE}.old`)
-      } catch {}
-      renameSync(LOG_FILE, `${LOG_FILE}.old`)
-    }
-  } catch {}
-}
 
 export default {
   id: "litellm",
   async setup(ctx) {
-    const options = { ...DEFAULTS, ...(ctx.options || {}) }
-    options.customerID ??= osUsername()
-    const providerID = options.providerID
+    const state = createEngine(ctx)
+    const options = state.options
+    const providerID = state.providerID
 
     rotateLogIfNeeded()
     log(`litellm plugin v${VERSION} loaded (providerID=${providerID}, baseURL=${options.baseURL})`)
 
-    // Mutable state captured by the provider/model transforms. sync()
-    // updates it and triggers a reload so the transforms replay with
-    // fresh values.
-    let baseURL = options.baseURL
-    let apiKey = options.apiKey || process.env.LITELLM_API_KEY
-    let keySource = options.apiKey
-      ? "options.apiKey"
-      : process.env.LITELLM_API_KEY
-        ? "LITELLM_API_KEY env"
-        : "none"
-    let models = []
-
-    async function resolveCredential() {
-      try {
-        const connection = await ctx.integration.connection.active(providerID)
-        if (!connection) return undefined
-        const credential = await ctx.integration.connection.resolve(connection)
-        if (credential && credential.type === "key") {
-          return { key: credential.key, source: "auth login credential" }
-        }
-        return undefined
-      } catch {
-        return undefined
-      }
-    }
-
     // ------------------------------------------------------------------
-    // Pricing + limits
-    //
-    // Two sources, merged per model:
-    //   1. Manual `options.pricing` — USD per 1M tokens (human-friendly)
-    //   2. Auto-discovered from the proxy's /model/info route — USD per
-    //      token + context limits. Requires the key to be allowed that
-    //      route (regular virtual keys often only get llm_api_routes;
-    //      an optional `options.infoKey` can supply a dedicated key).
-    // Precedence: explicit per-model user price > proxy price > "*" entry.
+    // Budget serving: plugin RPC (when the build offers it) + storage.
     // ------------------------------------------------------------------
-    let autoInfo = new Map() // model id -> { input?, output?, cacheRead?, cacheWrite?, context?, outputLimit? } (per-token USD)
-
-    // ModelCost in OpenCode's catalog is USD per 1M tokens (e.g.
-    // input 0.3 == $0.30 per million) — keep everything in that unit.
-    function userCostFor(id, wildcard = false) {
-      const pricing = options.pricing
-      if (!pricing || typeof pricing !== "object") return undefined
-      const entry = wildcard ? pricing["*"] : pricing[id]
-      if (!entry || typeof entry !== "object") return undefined
-      const perMillion = (value) => {
-        const n = Number(value)
-        return Number.isFinite(n) && n >= 0 ? n : undefined
-      }
-      const input = perMillion(entry.input)
-      const output = perMillion(entry.output)
-      if (input === undefined && output === undefined) return undefined
-      return {
-        input: input ?? 0,
-        output: output ?? 0,
-        cache: {
-          read: perMillion(entry.cacheRead) ?? 0,
-          write: perMillion(entry.cacheWrite) ?? 0,
-        },
-      }
-    }
-
-    function costFor(id) {
-      const user = userCostFor(id)
-      if (user) return user
-      const auto = autoInfo.get(id)
-      if (auto && (auto.input !== undefined || auto.output !== undefined)) {
-        return {
-          input: auto.input ?? 0,
-          output: auto.output ?? 0,
-          cache: {
-            read: auto.cacheRead ?? 0,
-            write: auto.cacheWrite ?? 0,
-          },
-        }
-      }
-      return userCostFor(id, true)
-    }
-
-    async function fetchModelInfo(reason) {
-      const key = options.infoKey || apiKey
-      if (!key) return
-      // LiteLLM management routes live at the proxy root, not under the
-      // OpenAI /v1 prefix — strip a trailing "/v1" from baseURL. The raw
-      // baseURL is tried as a fallback for exotic mounts.
-      const candidates = [...new Set([baseURL.replace(/\/v1\/?$/, ""), baseURL])].map(
-        (b) => `${b.replace(/\/$/, "")}/model/info`,
-      )
-
-      const headers = {
-        Authorization: `Bearer ${key}`,
-        ...(options.customerID
-          ? { "x-litellm-customer-id": options.customerID }
-          : {}),
-      }
-
-      let rejected = false
-      for (const url of candidates) {
-        try {
-          const res = await fetch(url, {
-            headers,
-            signal: AbortSignal.timeout(15_000),
-          })
-          if (res.ok) {
-            const json = await res.json()
-            const data = Array.isArray(json && json.data) ? json.data : []
-            const next = new Map()
-            for (const item of data) {
-              if (!item || typeof item !== "object") continue
-              const info =
-                item.model_info && typeof item.model_info === "object"
-                  ? item.model_info
-                  : item
-              const id = item.model_name || info.key || info.id
-              if (typeof id !== "string" || !id) continue
-              const num = (value) => {
-                const n = Number(value)
-                return Number.isFinite(n) && n >= 0 ? n : undefined
-              }
-              // LiteLLM reports per-token costs; OpenCode wants per 1M.
-              const perMillion = (value) => {
-                const n = num(value)
-                return n === undefined ? undefined : n * 1_000_000
-              }
-              const entry = {
-                input: perMillion(info.input_cost_per_token),
-                output: perMillion(info.output_cost_per_token),
-                cacheRead: perMillion(info.cache_read_input_token_cost),
-                cacheWrite: perMillion(info.cache_creation_input_token_cost),
-                context: num(info.max_input_tokens) ?? num(info.max_tokens),
-                outputLimit: num(info.max_output_tokens),
-              }
-              if (
-                entry.input !== undefined ||
-                entry.output !== undefined ||
-                entry.context !== undefined ||
-                entry.outputLimit !== undefined
-              ) {
-                next.set(id, entry)
-              }
-            }
-            autoInfo = next
-            log(`sync (${reason}): pricing/limits for ${next.size} models from ${url}`)
-            return
-          }
-          if (res.status === 401 || res.status === 403) {
-            rejected = true
-            continue
-          }
-          log(`sync (${reason}): GET ${url} -> ${res.status} ${res.statusText}`)
-          return
-        } catch (error) {
-          const message = error && error.message ? error.message : String(error)
-          log(`sync (${reason}): GET ${url} failed: ${message} (non-fatal)`)
-        }
-      }
-      if (autoInfo.size > 0) autoInfo = new Map()
-      if (rejected) {
-        log(
-          `sync (${reason}): /model/info rejected — this key is not allowed the route. ` +
-            `Add "/model/info" to the key's routes on the proxy (or set options.infoKey). ` +
-            `Manual options.pricing is used meanwhile.`,
-        )
-      }
-    }
-
-    // ------------------------------------------------------------------
-    // Budget window (LiteLLM key budget, e.g. a $100/day cap)
-    //
-    // Read from the proxy's /key/info route on every sync. The key must
-    // be allowed that route (like /model/info). The current value is:
-    //   - kept in plugin storage ("budget")
-    //   - served over plugin RPC (method "budget")
-    //   - pushed to TUI clients (event "rpc.litellm.budget")
-    // so the status-line widget in ./tui.tsx can render "$spent / $limit".
-    // ------------------------------------------------------------------
-    let budget = undefined // { spend, maxBudget, resetAt, duration, keyAlias, updatedAt }
-
-    const budgetSchema = {
-      type: "object",
-      properties: {
-        spend: { type: "number" },
-        maxBudget: { type: ["number", "null"] },
-        resetAt: { type: ["string", "null"] },
-        duration: { type: ["string", "null"] },
-        keyAlias: { type: ["string", "null"] },
-        updatedAt: { type: "string" },
-      },
-      required: ["spend", "updatedAt"],
-    }
-
     let rpc = undefined
-    try {
-      rpc = await ctx.rpc.register(
-        {
-          id: "litellm",
-          methods: {
-            budget: {
-              input: { type: "object", properties: {}, additionalProperties: false },
-              output: budgetSchema,
+    if (typeof ctx.rpc?.register === "function") {
+      try {
+        rpc = await ctx.rpc.register(
+          {
+            id: "litellm",
+            methods: {
+              budget: {
+                input: { type: "object", properties: {}, additionalProperties: false },
+                output: budgetSchema,
+              },
+            },
+            events: {
+              budget: { schema: budgetSchema },
             },
           },
-          events: {
-            budget: { schema: budgetSchema },
+          {
+            budget: async () => {
+              if (!state.budget) throw new Error("no budget data yet — /key/info not read or not granted")
+              return state.budget
+            },
           },
-        },
-        {
-          budget: async () => {
-            if (!budget) throw new Error("no budget data yet — /key/info not read or not granted")
-            return budget
-          },
-        },
-      )
-    } catch (error) {
-      const message = error && error.message ? error.message : String(error)
-      log(`rpc register failed: ${message} (budget RPC unavailable, non-fatal)`)
+        )
+        state.rpc = rpc
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error)
+        log(`rpc register failed: ${message} (budget RPC unavailable, non-fatal)`)
+        rpc = undefined
+      }
     }
 
-    let lastBudgetFetchAt = 0
-
+    let budgetRpcNoteLogged = false
     async function publishBudget() {
-      if (!budget || !rpc) return
-      try {
-        await rpc.events.emit("budget", budget)
-      } catch {
-        // no subscriber / transport hiccup — storage still has the value
+      if (!state.budget) return
+      if (rpc) {
+        try {
+          await rpc.events.emit("budget", state.budget)
+        } catch {
+          // no subscriber / transport hiccup — storage still has the value
+        }
+      } else if (!budgetRpcNoteLogged) {
+        budgetRpcNoteLogged = true
+        log("budget: plugin RPC is not available in this build — the TUI budget widget stays hidden, values are still logged and shown in the proxy")
       }
     }
 
@@ -366,316 +101,301 @@ export default {
 
     function queueBudgetRefresh() {
       clearTimeout(budgetDebounceTimer)
-      const sinceFetch = Date.now() - lastBudgetFetchAt
+      const sinceFetch = Date.now() - state.lastBudgetFetchAt
       const wait = Math.max(
         BUDGET_EVENT_DEBOUNCE_MS,
         BUDGET_EVENT_THROTTLE_MS - sinceFetch,
       )
       budgetDebounceTimer = setTimeout(() => {
         budgetDebounceTimer = undefined
-        void fetchBudget("message").catch(() => {})
+        void sync(state, "message", publishBudget).catch(() => {})
       }, wait)
     }
 
-    async function fetchBudget(reason) {
-      const key = options.infoKey || apiKey
-      if (!key) return
-      lastBudgetFetchAt = Date.now()
-      const root = baseURL.replace(/\/v1\/?$/, "").replace(/\/$/, "")
-      try {
-        const res = await fetch(`${root}/key/info`, {
-          headers: {
-            Authorization: `Bearer ${key}`,
-            ...(options.customerID
-              ? { "x-litellm-customer-id": options.customerID }
-              : {}),
-          },
-          signal: AbortSignal.timeout(15_000),
-        })
-        if (res.ok) {
-          const json = await res.json()
-          const info =
-            json && json.info && typeof json.info === "object" ? json.info : json
-          const num = (value) => {
-            const n = Number(value)
-            return Number.isFinite(n) && n >= 0 ? n : undefined
-          }
-          const limit =
-            Array.isArray(info.budget_limits) && info.budget_limits[0]
-              ? info.budget_limits[0]
-              : {}
-          const maxBudget = num(limit.max_budget) ?? num(info.max_budget)
-          const spend = num(info.spend)
-          if (spend === undefined && maxBudget === undefined) {
-            log(`sync (${reason}): /key/info ok but the key has no budget window`)
-            return
-          }
-          budget = {
-            spend: spend ?? 0,
-            maxBudget: maxBudget ?? null,
-            resetAt:
-              typeof limit.reset_at === "string"
-                ? limit.reset_at
-                : typeof info.budget_reset_at === "string"
-                  ? info.budget_reset_at
-                  : null,
-            duration:
-              typeof limit.budget_duration === "string"
-                ? limit.budget_duration
-                : typeof info.budget_duration === "string"
-                  ? info.budget_duration
-                  : null,
-            keyAlias: typeof info.key_alias === "string" ? info.key_alias : null,
-            updatedAt: new Date().toISOString(),
-          }
-          try {
-            await ctx.storage.set("budget", budget)
-          } catch {
-            // storage unavailable in this build — RPC still serves it
-          }
-          await publishBudget()
-          const limitText =
-            budget.maxBudget !== null ? ` / $${budget.maxBudget.toFixed(2)}` : ""
-          const resetText = budget.resetAt ? ` — resets ${budget.resetAt}` : ""
-          log(
-            `sync (${reason}): budget $${budget.spend.toFixed(2)}${limitText}${resetText}`,
-          )
-        } else if (res.status === 401 || res.status === 403) {
-          log(
-            `sync (${reason}): /key/info rejected (${res.status}) — grant the key the /key/info route to enable the budget display`,
-          )
-        } else {
-          log(`sync (${reason}): GET /key/info -> ${res.status} ${res.statusText}`)
-        }
-      } catch (error) {
-        const message = error && error.message ? error.message : String(error)
-        log(`sync (${reason}): /key/info fetch failed: ${message} (non-fatal)`)
-      }
+    // ------------------------------------------------------------------
+    // Catalog application (V2)
+    // ------------------------------------------------------------------
+    const PROVIDER_PACKAGE =
+      ctx.catalog && !ctx.provider
+        ? "@ai-sdk/openai-compatible" // released OpenCode ships the AI SDK provider packages
+        : "@opencode/ai/providers/openai-compatible" // older V2 fork
+
+    function providerSettings() {
+      return state.apiKey
+        ? { apiKey: state.apiKey, baseURL: state.baseURL }
+        : {}
     }
 
-    // Registered once; replayed on every provider/model reload.
-    //
-    // The provider transform contributes the "litellm" source definition
-    // (settings, headers) and its model inventory; the model transform
-    // re-applies pricing and limits to the active candidates. Both capture
-    // the mutable sync() state and stay cheap and repeatable.
-    function modelRecord(id) {
-      const record = {
+    function modelApi(id) {
+      return {
         id,
-        modelID: id,
-        providerID,
-        name: id,
-        capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
-        variants: [],
-        time: { released: 0 },
-        cost: [],
-        status: "active",
-        enabled: true,
-        limit: { context: 200_000, output: 32_000 },
+        type: "aisdk",
+        package: PROVIDER_PACKAGE,
+        url: state.baseURL,
+        settings: { ...providerSettings() },
       }
-      const cost = costFor(id)
-      if (cost) record.cost = [cost]
-      const info = autoInfo.get(id)
-      if (info) {
-        if (info.context) record.limit.context = info.context
-        if (info.outputLimit) record.limit.output = info.outputLimit
-      }
-      return record
     }
 
-    await ctx.provider.transform((editor) => {
-      const existing = editor.get(providerID)
-      if (existing) {
-        editor.update(providerID, (provider) => {
-          provider.name = options.name
-          if (!provider.package) provider.package = "@opencode/ai/providers/openai-compatible"
-          if (!provider.settings) provider.settings = {}
-          provider.settings.baseURL = baseURL
-          if (apiKey) provider.settings.apiKey = apiKey
-          if (options.customerID) {
-            if (!provider.headers) provider.headers = {}
-            provider.headers["x-litellm-customer-id"] = options.customerID
-          }
-        })
-        // Source model definitions are immutable records: rebuild the
-        // inventory as proxy models plus any config-defined static models
-        // (an empty discovery list keeps the previous inventory, e.g.
-        // after a network failure).
-        if (models.length > 0) {
-          const kept = []
-          for (const [id, info] of existing.models) {
-            if (!models.includes(id)) kept.push(info)
-          }
-          editor.models.set(providerID, [...kept, ...models.map(modelRecord)])
-        }
+    function applyModelCosts(m, id) {
+      const cost = costFor(state, id)
+      if (cost) m.cost = [cost]
+      const info = state.autoInfo.get(id)
+      const context = info?.context ?? 200_000
+      const output = info?.outputLimit ?? 32_000
+      if (m.limit && typeof m.limit === "object") {
+        m.limit.context = context
+        m.limit.output = output
       } else {
-        // No providers.litellm config block: register the provider so the
-        // model list and auth flow can discover it.
-        editor.add({
-          info: {
-            id: providerID,
-            name: options.name,
-            activation: "enabled",
-            package: "@opencode/ai/providers/openai-compatible",
-            settings: { baseURL, ...(apiKey ? { apiKey } : {}) },
-            ...(options.customerID
-              ? { headers: { "x-litellm-customer-id": options.customerID } }
-              : {}),
-          },
-          models: models.map(modelRecord),
-        })
+        m.limit = { context, output }
       }
-    })
-
-    // Re-applies name/cost/limits to the active candidates on every replay
-    // (covers provider inventory coming from config rather than models.set).
-    await ctx.model.transform((editor) => {
-      if (!editor.provider.get(providerID)) return
-      for (const id of models) {
-        editor.update(providerID, id, (model) => {
-          model.name = id
-          const cost = costFor(id)
-          if (cost) model.cost = [cost]
-          const info = autoInfo.get(id)
-          if (info) {
-            if (info.context) model.limit.context = info.context
-            if (info.outputLimit) model.limit.output = info.outputLimit
-          }
-        })
-      }
-      // Drop the installer's placeholder seed once real models exist
-      if (models.length > 0 && editor.get(providerID, "placeholder")) {
-        editor.remove(providerID, "placeholder")
-      }
-    })
-
-    async function sync(reason) {
-      const credential = await resolveCredential()
-      if (credential) {
-        apiKey = credential.key
-        keySource = credential.source
-      }
-      if (options.apiKey) {
-        apiKey = options.apiKey
-        keySource = "options.apiKey"
-      }
-      const why = reason || "startup"
-
-      if (!apiKey) {
-        log(
-          `sync (${why}): no API key found — models NOT fetched. Fix one of: ` +
-            `run "opencode2 auth login" and pick LiteLLM, ` +
-            `or set options.apiKey, or export LITELLM_API_KEY`,
-        )
-        await ctx.provider.reload()
-        return
-      }
-
-      log(`sync (${why}): key from ${keySource}, baseURL=${baseURL}`)
-      try {
-        const res = await fetch(`${baseURL.replace(/\/$/, "")}/models`, {
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            ...(options.customerID
-              ? { "x-litellm-customer-id": options.customerID }
-              : {}),
-          },
-          signal: AbortSignal.timeout(15_000),
-        })
-        if (res.ok) {
-          const json = await res.json()
-          const data = Array.isArray(json && json.data) ? json.data : []
-          const discovered = data
-            .map((m) => (m ? m.id : undefined))
-            .filter((id) => typeof id === "string" && !!id)
-            .filter((id) => !options.exclude || !id.includes(options.exclude))
-          const added = discovered.filter((id) => !models.includes(id))
-          const removed = models.filter((id) => !discovered.includes(id))
-          models = discovered
-          log(
-            `sync (${why}): ${discovered.length} models (+${added.length} new, -${removed.length} gone)`,
-          )
-        } else {
-          const hint =
-            res.status === 401 || res.status === 403
-              ? " — key rejected: check it is a valid LiteLLM proxy key"
-              : ""
-          log(`sync (${why}): GET ${baseURL}/models -> ${res.status} ${res.statusText}${hint}`)
-          // keep the previous model list
-        }
-      } catch (error) {
-        const message = error && error.message ? error.message : String(error)
-        log(
-          `sync (${why}): fetch failed: ${message} — is the proxy reachable at ${baseURL}?`,
-        )
-        // network failures keep the previous model list
-      }
-
-      // Pricing + context limits from the proxy (non-fatal on failure).
-      await fetchModelInfo(why)
-
-      // Budget window from the proxy (non-fatal on failure).
-      await fetchBudget(why)
-
-      await ctx.provider.reload()
+      m.status = "active"
+      m.enabled = true
     }
 
-    await sync("startup")
+    if (typeof ctx.catalog?.transform === "function") {
+      // Released OpenCode 2.x catalog API.
+      await ctx.catalog.transform((draft) => {
+        draft.provider.update(providerID, (provider) => {
+          provider.name = options.name
+          provider.api = {
+            type: "aisdk",
+            package: PROVIDER_PACKAGE,
+            url: state.baseURL,
+            settings: { ...providerSettings() },
+          }
+          if (!provider.request || typeof provider.request !== "object") {
+            provider.request = { headers: {}, body: {} }
+          }
+          provider.request.headers = provider.request.headers || {}
+          provider.request.body = provider.request.body || {}
+          if (options.customerID) {
+            provider.request.headers["x-litellm-customer-id"] = options.customerID
+          }
+          if (provider.disabled === undefined || state.models.length > 0) {
+            provider.disabled = false
+          }
+        })
+
+        if (state.models.length > 0) {
+          for (const id of state.models) {
+            try {
+              draft.model.update(providerID, id, (m) => {
+                m.name = id
+                m.api = modelApi(id)
+                if (!m.capabilities || typeof m.capabilities !== "object") {
+                  m.capabilities = { tools: true, input: ["text", "image"], output: ["text"] }
+                } else {
+                  m.capabilities.tools = true
+                  if (!Array.isArray(m.capabilities.input) || m.capabilities.input.length === 0) {
+                    m.capabilities.input = ["text", "image"]
+                  }
+                  if (!Array.isArray(m.capabilities.output) || m.capabilities.output.length === 0) {
+                    m.capabilities.output = ["text"]
+                  }
+                }
+                if (!m.request || typeof m.request !== "object") {
+                  m.request = { headers: {}, body: {} }
+                }
+                m.request.headers = m.request.headers || {}
+                m.request.body = m.request.body || {}
+                if (!Array.isArray(m.variants)) m.variants = []
+                if (!m.time || typeof m.time !== "object") m.time = { released: 0 }
+                if (!Array.isArray(m.cost)) m.cost = []
+                applyModelCosts(m, id)
+              })
+            } catch (error) {
+              log(`catalog: model update failed for ${id}: ${error?.message ?? error}`)
+            }
+          }
+          // Drop discovery-tracked models that the proxy no longer serves
+          // (config-defined static models are never tracked/removed).
+          for (const id of state.appliedModels) {
+            if (state.models.includes(id)) continue
+            try {
+              draft.model.remove(providerID, id)
+            } catch {}
+          }
+        }
+        // Drop the installer's placeholder seed once real models exist
+        if (state.models.length > 0 && draft.model.get?.(providerID, "placeholder")) {
+          try {
+            draft.model.remove(providerID, "placeholder")
+          } catch {}
+        }
+        state.appliedModels = new Set(state.models)
+      })
+    } else {
+      // Older V2 builds: provider + model transforms.
+      // Legacy V2 record shape (older builds with editor.add/editor.models).
+      function modelRecordLegacy(id) {
+        const record = {
+          id,
+          modelID: id,
+          providerID,
+          name: id,
+          capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+          variants: [],
+          time: { released: 0 },
+          cost: [],
+          status: "active",
+          enabled: true,
+          limit: { context: 200_000, output: 32_000 },
+        }
+        const cost = costFor(state, id)
+        if (cost) record.cost = [cost]
+        const info = state.autoInfo.get(id)
+        if (info) {
+          if (info.context) record.limit.context = info.context
+          if (info.outputLimit) record.limit.output = info.outputLimit
+        }
+        return record
+      }
+
+      await ctx.provider?.transform?.((editor) => {
+        const existing = editor.get(providerID)
+        if (existing) {
+          editor.update(providerID, (provider) => {
+            provider.name = options.name
+            if (!provider.package) provider.package = PROVIDER_PACKAGE
+            if (!provider.settings) provider.settings = {}
+            provider.settings.baseURL = state.baseURL
+            if (state.apiKey) provider.settings.apiKey = state.apiKey
+            if (options.customerID) {
+              if (!provider.headers) provider.headers = {}
+              provider.headers["x-litellm-customer-id"] = options.customerID
+            }
+          })
+          // Source model definitions are immutable records: rebuild the
+          // inventory as proxy models plus any config-defined static models
+          // (an empty discovery list keeps the previous inventory, e.g.
+          // after a network failure).
+          if (state.models.length > 0) {
+            const kept = []
+            for (const [id, info] of existing.models) {
+              if (!state.models.includes(id)) kept.push(info)
+            }
+            editor.models.set(providerID, [...kept, ...state.models.map(modelRecordLegacy)])
+          }
+        } else {
+          // No providers.litellm config block: register the provider so the
+          // model list and auth flow can discover it.
+          editor.add({
+            info: {
+              id: providerID,
+              name: options.name,
+              activation: "enabled",
+              package: PROVIDER_PACKAGE,
+              settings: { baseURL: state.baseURL, ...(state.apiKey ? { apiKey: state.apiKey } : {}) },
+              ...(options.customerID
+                ? { headers: { "x-litellm-customer-id": options.customerID } }
+                : {}),
+            },
+            models: state.models.map(modelRecordLegacy),
+          })
+        }
+        state.appliedModels = new Set(state.models)
+      })
+
+      await ctx.model?.transform?.((editor) => {
+        if (!editor.provider.get(providerID)) return
+        for (const id of state.models) {
+          editor.update(providerID, id, (model) => {
+            model.name = id
+            applyModelCosts(model, id)
+          })
+        }
+        // Drop the installer's placeholder seed once real models exist
+        if (state.models.length > 0 && editor.get(providerID, "placeholder")) {
+          editor.remove(providerID, "placeholder")
+        }
+      })
+    }
+
+    async function reload() {
+      try {
+        if (typeof ctx.catalog?.reload === "function") {
+          await ctx.catalog.reload()
+          return
+        }
+        await ctx.provider?.reload?.()
+      } catch (error) {
+        log(`reload failed: ${error && error.message ? error.message : error} (non-fatal)`)
+      }
+    }
+
+    await sync(state, "startup", reload)
 
     if (options.sessionHeader) {
-      await ctx.session.hook(
-        "model.request",
-        (event) => {
-          event.headers["x-litellm-session-id"] = event.sessionID
-        },
-        { providerID },
-      )
+      try {
+        await ctx.session?.hook?.(
+          "model.request",
+          (event) => {
+            event.headers["x-litellm-session-id"] = event.sessionID
+          },
+          { providerID },
+        )
+      } catch (error) {
+        log(
+          `session hook unavailable: ${error && error.message ? error.message : error} — ` +
+            `x-litellm-session-id will not be sent on this build (non-fatal)`,
+        )
+      }
     }
 
-    // Refresh when a new session starts (covers "opening OpenCode" against
-    // an already-running service). Throttled to at most once per 30 seconds.
-    // Also re-read the budget after every response finishes, so the status
-    // line ticks up right away (debounced + throttled inside
-    // queueBudgetRefresh).
     const BUDGET_EVENT_TYPES = new Set([
       "session.execution.succeeded",
       "session.execution.failed",
       "session.execution.interrupted",
     ])
-    const controller = new AbortController()
+
+    // Event-driven refreshes are optional: newer builds expose an event
+    // subscription, others fall back to the timer below.
     let lastSyncAt = Date.now()
-    void (async () => {
-      try {
-        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-          if (
-            event &&
-            event.type === "session.created" &&
-            Date.now() - lastSyncAt >= 30_000
-          ) {
-            lastSyncAt = Date.now()
-            log("event: session.created -> sync")
-            void sync("session.created").catch(() => {})
+    let eventStream = undefined
+    try {
+      if (typeof ctx.event?.subscribe === "function") {
+        const controller = new AbortController()
+        eventStream = controller
+        void (async () => {
+          try {
+            for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+              if (
+                event &&
+                event.type === "session.created" &&
+                Date.now() - lastSyncAt >= 30_000
+              ) {
+                lastSyncAt = Date.now()
+                log("event: session.created -> sync")
+                void sync(state, "session.created", reload).catch(() => {})
+              }
+              if (event && BUDGET_EVENT_TYPES.has(event.type)) {
+                queueBudgetRefresh()
+              }
+            }
+          } catch {
+            // stream closed
           }
-          if (event && BUDGET_EVENT_TYPES.has(event.type)) {
-            queueBudgetRefresh()
-          }
-        }
-      } catch {
-        // stream closed
+        })()
       }
-    })()
+    } catch (error) {
+      log(`event subscribe unavailable: ${error && error.message ? error.message : error} (non-fatal)`)
+    }
 
     const timer = setInterval(
       () => {
-        void sync("timer").catch(() => {})
+        void sync(state, "timer", reload).catch(() => {})
       },
       Math.max(1, options.refreshMinutes) * 60_000,
     )
+    // Do not keep the OpenCode process alive just for the refresh timer.
+    try {
+      timer.unref?.()
+    } catch {}
 
     return () => {
       clearInterval(timer)
       clearTimeout(budgetDebounceTimer)
-      controller.abort()
+      eventStream?.abort?.()
     }
   },
 }

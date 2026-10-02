@@ -15,7 +15,8 @@ It gives you a fully wired `litellm` provider with:
 
 ## Requirements
 
-- OpenCode 2 (`opencode2`) — this is a V2 plugin, it does not work on V1.
+- OpenCode 2 — this is a V2-era plugin; it also supports the plugin API of
+  released OpenCode 2.x builds (`opencode` CLI).
 - A reachable LiteLLM proxy (OpenAI-compatible endpoints, default port 4000).
 
 ## Install
@@ -38,9 +39,10 @@ The `?t=$(date +%s)` parameter only busts raw.githubusercontent's ~5-minute
 CDN cache so you always get the latest script.
 
 The installer runs `opencode2 plugin add`, adds the required
-`providers.litellm` block to your global config, applies the proxy URL, and
-clears previously cached copies of the plugin package — so **re-running it
-also updates the plugin to the latest version**.
+`providers.litellm` block to your global config, applies the proxy URL,
+seeds the released-build hooks entrypoint (see below), and clears
+previously cached copies of the plugin package — so **re-running it also
+updates the plugin to the latest version**.
 
 Then connect your key:
 
@@ -88,8 +90,7 @@ requests (the plugin keeps its settings updated at runtime):
   "providers": {
     "litellm": {
       "name": "LiteLLM",
-      "env": ["LITELLM_API_KEY"],
-      "package": "@opencode/ai/providers/openai-compatible"
+      "env": ["LITELLM_API_KEY"]
     }
   }
 }
@@ -98,6 +99,23 @@ requests (the plugin keeps its settings updated at runtime):
 No `models` block is needed — the plugin adds the discovered models
 automatically. The `env` field is what makes LiteLLM appear in
 `/connect` and `opencode2 auth login`.
+
+### Released OpenCode 2.x builds
+
+Released OpenCode 2.x builds sessions on a different runtime, so the
+installer additionally writes a `plugin` entry pointing at
+`.opencode/plugins/litellm-hooks.js` (copied to `hooks/` inside the
+global config dir). That entry injects the discovered models and the
+proxy pricing into the session runtime, adds the session/customer
+headers on every request, and re-syncs when new sessions start.
+
+Notes for released builds:
+
+- Models added on the proxy show up in `/models`, CLI list and the
+  plugin log on the next OpenCode start (the session runtime builds its
+  provider registry once; the TUI model list refreshes live).
+- The API key is taken from `LITELLM_API_KEY`, `options.apiKey`, or the
+  tuple's options — the `/connect` credential works on V2-style builds.
 
 ## How the proxy URL is resolved
 
@@ -156,7 +174,7 @@ tail -20 ~/.local/share/opencode/litellm-plugin.log
 | `no API key found` | No key connected | `opencode2 auth login` → pick **LiteLLM** → paste key, then restart |
 | `GET .../models -> 401` / `403` | Key rejected (wrong/expired) | Reconnect a valid proxy key via `opencode2 auth login` |
 | `fetch failed: ...` | Proxy unreachable | Check `options.baseURL`; for Tailscale proxies make sure the machine is on the tailnet |
-| no log lines at all | Plugin not loaded | `opencode2 api get /api/plugin` must show `litellm` active — restart after install |
+| no log lines at all | Plugin not loaded | the plugin entry must be present in the config (`opencode2 plugin add` writes it); released OpenCode 2.x builds also need the `hooks/` copy `install.sh` seeds |
 
 Quick reachability test from that machine (with your proxy key):
 
@@ -179,6 +197,9 @@ the active session is running a `litellm/*` model:
 - color-coded: green < 60%, yellow 60–85%, red ≥ 85%
 - a warning toast once per window when spending crosses 90%
 - hidden on the home screen and whenever another provider is active
+- hidden entirely on released OpenCode 2.x builds (plugin RPC is not
+  available there — the budget is still read, logged, and shown in the
+  LiteLLM UI)
 
 Requirements on the proxy side — grant the key two routes:
 
