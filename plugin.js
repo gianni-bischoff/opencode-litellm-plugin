@@ -3,6 +3,7 @@ import {
   rotateLogIfNeeded,
   createEngine,
   costFor,
+  reasoningFor,
   log,
   sync,
   budgetSchema,
@@ -142,6 +143,33 @@ export default {
       }
     }
 
+    function applyModelReasoning(m, id, existing) {
+      if (Array.isArray(existing?.variants) && existing.variants.length > 0) {
+        m.variants = existing.variants
+        if (existing.capabilities?.reasoning) {
+          m.capabilities = m.capabilities || {}
+          m.capabilities.reasoning = existing.capabilities.reasoning
+        }
+        return
+      }
+      if (Array.isArray(m.variants) && m.variants.length > 0) {
+        return
+      }
+
+      const reasoning = reasoningFor(state, id)
+      if (reasoning) {
+        m.capabilities = m.capabilities || {}
+        m.capabilities.reasoning = {
+          supported: true,
+          effort: reasoning.effort,
+          ...(reasoning.toggle ? { toggle: true } : {}),
+        }
+        m.variants = reasoning.variants.map((v) => ({ ...v }))
+      } else {
+        if (!Array.isArray(m.variants)) m.variants = []
+      }
+    }
+
     function applyModelCosts(m, id) {
       const cost = costFor(state, id)
       if (cost) m.cost = [cost]
@@ -204,7 +232,7 @@ export default {
                 }
                 m.request.headers = m.request.headers || {}
                 m.request.body = m.request.body || {}
-                if (!Array.isArray(m.variants)) m.variants = []
+                applyModelReasoning(m, id)
                 if (!m.time || typeof m.time !== "object") m.time = { released: 0 }
                 if (!Array.isArray(m.cost)) m.cost = []
                 applyModelCosts(m, id)
@@ -233,7 +261,7 @@ export default {
     } else {
       // Older V2 builds: provider + model transforms.
       // Legacy V2 record shape (older builds with editor.add/editor.models).
-      function modelRecordLegacy(id) {
+      function modelRecordLegacy(id, existing) {
         const record = {
           id,
           modelID: id,
@@ -254,6 +282,10 @@ export default {
           if (info.context) record.limit.context = info.context
           if (info.outputLimit) record.limit.output = info.outputLimit
         }
+        if (existing?.settings) record.settings = { ...existing.settings, ...record.settings }
+        if (existing?.headers) record.headers = { ...existing.headers }
+        if (existing?.body) record.body = { ...existing.body }
+        applyModelReasoning(record, id, existing)
         return record
       }
 
@@ -277,10 +309,21 @@ export default {
           // after a network failure).
           if (state.models.length > 0) {
             const kept = []
-            for (const [id, info] of existing.models) {
-              if (!state.models.includes(id)) kept.push(info)
+            const existingMap = new Map()
+            if (existing.models && typeof existing.models[Symbol.iterator] === "function") {
+              for (const item of existing.models) {
+                const id = Array.isArray(item) ? item[0] : item?.id
+                const info = Array.isArray(item) ? item[1] : item
+                if (id) {
+                  existingMap.set(id, info)
+                  if (!state.models.includes(id)) kept.push(info)
+                }
+              }
             }
-            editor.models.set(providerID, [...kept, ...state.models.map(modelRecordLegacy)])
+            editor.models.set(
+              providerID,
+              [...kept, ...state.models.map((id) => modelRecordLegacy(id, existingMap.get(id)))],
+            )
           }
         } else {
           // No providers.litellm config block: register the provider so the
@@ -296,7 +339,7 @@ export default {
                 ? { headers: { "x-litellm-customer-id": options.customerID } }
                 : {}),
             },
-            models: state.models.map(modelRecordLegacy),
+            models: state.models.map((id) => modelRecordLegacy(id)),
           })
         }
         state.appliedModels = new Set(state.models)
@@ -307,6 +350,7 @@ export default {
         for (const id of state.models) {
           editor.update(providerID, id, (model) => {
             model.name = id
+            applyModelReasoning(model, id)
             applyModelCosts(model, id)
           })
         }

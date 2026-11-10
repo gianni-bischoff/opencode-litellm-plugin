@@ -12,6 +12,9 @@ It gives you a fully wired `litellm` provider with:
   and options.
 - **Session tracking** — sends an `x-litellm-session-id` header on every
   LiteLLM request so per-session spend shows up in the LiteLLM UI.
+- **Reasoning / Effort levels** — detects reasoning models from proxy metadata
+  (`/model/info`) or model names and exposes effort level variants (`#low`,
+  `#medium`, `#high`, `#none`) in OpenCode.
 
 ## Requirements
 
