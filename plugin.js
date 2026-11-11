@@ -150,6 +150,14 @@ export default {
           m.capabilities = m.capabilities || {}
           m.capabilities.reasoning = existing.capabilities.reasoning
         }
+        if (existing.settings?.reasoningEffort) {
+          m.settings = m.settings || {}
+          m.settings.reasoningEffort = existing.settings.reasoningEffort
+          if (m.api && typeof m.api === "object") {
+            m.api.settings = m.api.settings || {}
+            m.api.settings.reasoningEffort = existing.settings.reasoningEffort
+          }
+        }
         return
       }
       if (Array.isArray(m.variants) && m.variants.length > 0) {
@@ -165,6 +173,14 @@ export default {
           ...(reasoning.toggle ? { toggle: true } : {}),
         }
         m.variants = reasoning.variants.map((v) => ({ ...v }))
+        if (reasoning.defaultEffort) {
+          m.settings = m.settings || {}
+          m.settings.reasoningEffort = reasoning.defaultEffort
+          if (m.api && typeof m.api === "object") {
+            m.api.settings = m.api.settings || {}
+            m.api.settings.reasoningEffort = reasoning.defaultEffort
+          }
+        }
       } else {
         if (!Array.isArray(m.variants)) m.variants = []
       }
@@ -274,6 +290,7 @@ export default {
           status: "active",
           enabled: true,
           limit: { context: 200_000, output: 32_000 },
+          settings: { ...providerSettings() },
         }
         const cost = costFor(state, id)
         if (cost) record.cost = [cost]
@@ -282,7 +299,7 @@ export default {
           if (info.context) record.limit.context = info.context
           if (info.outputLimit) record.limit.output = info.outputLimit
         }
-        if (existing?.settings) record.settings = { ...existing.settings, ...record.settings }
+        if (existing?.settings) record.settings = { ...record.settings, ...existing.settings }
         if (existing?.headers) record.headers = { ...existing.headers }
         if (existing?.body) record.body = { ...existing.body }
         applyModelReasoning(record, id, existing)
